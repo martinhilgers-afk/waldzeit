@@ -1,97 +1,115 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/lib/supabase";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
 
 type DayRow = {
   id: string;
   date: string; // YYYY-MM-DD
-  work_items?: { objekt: string | null }[]; // joined
 };
 
-function parseISODate(dateStr: string) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, (m ?? 1) - 1, d ?? 1);
+type ItemRow = {
+  workday_id: string;
+  objekt: string | null;
+};
+
+type DayUI = {
+  id: string;
+  date: string;
+  objekte: string[]; // unique
+};
+
+function isoWeekKey(dateISO: string) {
+  // ISO week: returns "2026-KW09"
+  const d = new Date(dateISO + "T12:00:00");
+  const dayNum = (d.getDay() + 6) % 7; // Mon=0..Sun=6
+  d.setDate(d.getDate() - dayNum + 3); // Thursday
+  const firstThursday = new Date(d.getFullYear(), 0, 4);
+  const firstDayNum = (firstThursday.getDay() + 6) % 7;
+  firstThursday.setDate(firstThursday.getDate() - firstDayNum + 3);
+  const week = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  return `${d.getFullYear()}-KW${String(week).padStart(2, "0")}`;
 }
 
-function formatDE(dateStr: string) {
-  const d = parseISODate(dateStr);
-  return d.toLocaleDateString("de-DE", {
-    weekday: "short",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-}
-
-function isoWeekInfo(dateStr: string) {
-  const d0 = parseISODate(dateStr);
-  const d = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate());
-  d.setHours(0, 0, 0, 0);
-
-  const day = (d.getDay() + 6) % 7; // Mon=0..Sun=6
-  const thursday = new Date(d);
-  thursday.setDate(d.getDate() - day + 3);
-
-  const weekYear = thursday.getFullYear();
-
-  const jan4 = new Date(weekYear, 0, 4);
-  const jan4Day = (jan4.getDay() + 6) % 7;
-  const week1Mon = new Date(jan4);
-  week1Mon.setDate(jan4.getDate() - jan4Day);
-
-  const diffDays = Math.round(
-    (thursday.getTime() - week1Mon.getTime()) / (1000 * 60 * 60 * 24)
-  );
-  const weekNo = 1 + Math.floor(diffDays / 7);
-
-  const weekStart = new Date(d);
-  weekStart.setDate(d.getDate() - day); // Monday
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekStart.getDate() + 6); // Sunday
-
-  const range = `${weekStart.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-  })}–${weekEnd.toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-  })}`;
-
-  return { weekYear, weekNo, weekStart, weekEnd, range };
-}
-
-function uniqObjects(items?: { objekt: string | null }[]) {
-  const set = new Set<string>();
-  (items ?? []).forEach((x) => {
-    const o = (x.objekt ?? "").trim();
-    if (o) set.add(o);
-  });
-  return Array.from(set);
+function fmtDE(dateISO: string) {
+  const [y, m, d] = dateISO.split("-");
+  return `${d}.${m}.${y}`;
 }
 
 export default function Overview() {
-  const [days, setDays] = useState<DayRow[]>([]);
+  const [days, setDays] = useState<DayUI[]>([]);
   const [msg, setMsg] = useState("");
   const [meName, setMeName] = useState<string>("");
 
+  const [isAdmin, setIsAdmin] = useState(false);
+
   async function load() {
     setMsg("Lade...");
-    const { data, error } = await supabase
-      .from("workdays")
-      .select("id,date,work_items(objekt)")
-      .order("date", { ascending: false })
-      .limit(200);
 
-    if (error) {
-      setMsg("Fehler: " + error.message);
+    // 1) Workdays
+    const { data: dayData, error: dayErr } = await supabase
+      .from("workdays")
+      .select("id,date")
+      .order("date", { ascending: false })
+      .limit(80);
+
+    if (dayErr) {
+      setMsg("Fehler: " + dayErr.message);
       setDays([]);
-    } else {
-      setDays((data as any) ?? []);
-      setMsg("");
+      return;
     }
+
+    const rawDays = ((dayData as any[]) ?? []) as DayRow[];
+    const ids = rawDays.map((d) => d.id);
+
+    // 2) Objekte der Einsätze für diese Tage
+    let itemData: ItemRow[] = [];
+    if (ids.length > 0) {
+      const { data: items, error: itemErr } = await supabase
+        .from("work_items")
+        .select("workday_id,objekt")
+        .in("workday_id", ids);
+
+      if (itemErr) {
+        setMsg("Fehler: " + itemErr.message);
+        setDays([]);
+        return;
+      }
+
+      itemData = ((items as any[]) ?? []) as ItemRow[];
+    }
+
+    const map = new Map<string, string[]>();
+    for (const it of itemData) {
+      if (!it.workday_id) continue;
+      const v = (it.objekt ?? "").trim();
+      if (!v) continue;
+      const arr = map.get(it.workday_id) ?? [];
+      arr.push(v);
+      map.set(it.workday_id, arr);
+    }
+
+    const ui: DayUI[] = rawDays.map((d) => {
+      const objs = map.get(d.id) ?? [];
+      const uniq = Array.from(new Set(objs)).sort((a, b) => a.localeCompare(b));
+      return { id: d.id, date: d.date, objekte: uniq };
+    });
+
+    setDays(ui);
+    setMsg("");
+  }
+
+  async function loadIsAdmin() {
+    // wichtig: das muss mit eingeloggtem User laufen
+    const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
+    if (error) {
+      // wenn RLS blockiert -> dann bist du nicht admin (oder policy falsch)
+      setIsAdmin(false);
+      return;
+    }
+    setIsAdmin((data as any[])?.length > 0);
   }
 
   useEffect(() => {
@@ -102,7 +120,8 @@ export default function Overview() {
         return;
       }
       setMeName(me.firstName);
-      await load();
+
+      await Promise.all([loadIsAdmin(), load()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -113,129 +132,99 @@ export default function Overview() {
   }
 
   const grouped = useMemo(() => {
-    const map = new Map<string, { title: string; rows: DayRow[] }>();
-
+    const g = new Map<string, DayUI[]>();
     for (const d of days) {
-      const wi = isoWeekInfo(d.date);
-      const key = `${wi.weekYear}-W${String(wi.weekNo).padStart(2, "0")}`;
-      const title = `KW ${wi.weekNo} / ${wi.weekYear} (${wi.range})`;
-
-      if (!map.has(key)) map.set(key, { title, rows: [] });
-      map.get(key)!.rows.push(d);
+      const key = isoWeekKey(d.date);
+      const arr = g.get(key) ?? [];
+      arr.push(d);
+      g.set(key, arr);
     }
-
-    return Array.from(map.entries()).map(([key, v]) => ({ key, ...v }));
+    // sort keys desc
+    const keys = Array.from(g.keys()).sort((a, b) => (a < b ? 1 : -1));
+    return keys.map((k) => ({ key: k, days: g.get(k)! }));
   }, [days]);
 
   return (
-    <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 12,
-        }}
-      >
+    <main className="wrap">
+      <header className="head">
         <div>
-          <h1 style={{ margin: 0 }}>Übersicht</h1>
-          <div style={{ opacity: 0.8, marginTop: 6 }}>
+          <h1 className="h1">Übersicht</h1>
+          <div className="sub">
             Angemeldet als: <b>{meName || "…"}</b>{" "}
-            <Link href="/profile" style={{ marginLeft: 10 }}>
+            <Link href="/profile" className="link">
               Profil
             </Link>
           </div>
         </div>
 
-        <button
-          onClick={logout}
-          style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-        >
-          Abmelden
-        </button>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {isAdmin && (
+            <Link href="/admin">
+              <button className="btn">Admin</button>
+            </Link>
+          )}
+          <button onClick={logout} className="btn">
+            Abmelden
+          </button>
+        </div>
       </header>
 
       <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
         <Link href="/new">
-          <button
-            style={{
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #ddd",
-              fontWeight: 800,
-            }}
-          >
-            + Neuer Tag
-          </button>
+          <button className="btnPrimary">+ Neuer Tag</button>
         </Link>
 
-        <button
-          onClick={load}
-          style={{ padding: 12, borderRadius: 12, border: "1px solid #ddd" }}
-        >
+        <button onClick={load} className="btn">
           Aktualisieren
         </button>
       </div>
 
-      {msg && <p style={{ whiteSpace: "pre-wrap" }}>{msg}</p>}
+      {msg && <p className="msg">{msg}</p>}
 
-      {/* Wochen-Gruppierung */}
-      <div style={{ display: "grid", gap: 18, marginTop: 16 }}>
-        {grouped.map((g) => (
-          <section
-            key={g.key}
-            style={{ border: "1px solid #eee", borderRadius: 14, padding: 12 }}
-          >
-            <h2 style={{ margin: 0, fontSize: 18 }}>{g.title}</h2>
+      <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
+        {grouped.map((w) => (
+          <section key={w.key} className="card">
+            <h2 className="h2">{w.key}</h2>
 
-            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-              {g.rows.map((d) => {
-                const objs = uniqObjects(d.work_items);
-                const objText =
-                  objs.length === 0
-                    ? "—"
-                    : objs.length <= 3
-                    ? objs.join(", ")
-                    : `${objs.slice(0, 3).join(", ")} (+${objs.length - 3})`;
-
-                // ✅ Klick führt zum Bearbeiten dieses Tages (über workday.id)
-                return (
-                  <Link
-                    key={d.id}
-                    href={`/app/day/${d.id}`}
-                    style={{ textDecoration: "none", color: "inherit" }}
-                  >
-                    <div
-                      style={{
-                        border: "1px solid #eee",
-                        borderRadius: 14,
-                        padding: 12,
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          gap: 12,
-                          alignItems: "baseline",
-                        }}
-                      >
-                        <b>{formatDE(d.date)}</b>
-                        <span style={{ opacity: 0.7 }}>Bearbeiten</span>
-                      </div>
-
-                      <div style={{ marginTop: 6, opacity: 0.9 }}>
-                        <span style={{ opacity: 0.75 }}>Objekte: </span>
-                        {objText}
-                      </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {w.days.map((d) => (
+                <Link key={d.id} href={`/app/day/${d.id}`} style={{ textDecoration: "none", color: "inherit" }}>
+                  <div className="rowCard">
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                      <b>{fmtDE(d.date)}</b>
+                      {/* Uhrzeiten absichtlich weg */}
                     </div>
-                  </Link>
-                );
-              })}
+
+                    <div style={{ marginTop: 6, opacity: 0.85 }}>
+                      {d.objekte.length > 0 ? d.objekte.join(", ") : <span style={{ opacity: 0.6 }}>(keine Einsätze)</span>}
+                    </div>
+                  </div>
+                </Link>
+              ))}
             </div>
           </section>
         ))}
       </div>
+
+      <style jsx>{baseStyles}</style>
     </main>
   );
 }
+
+const baseStyles = `
+.wrap{max-width:900px;margin:24px auto;padding:12px}
+.head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.h1{margin:0;font-size:36px;line-height:1.1}
+.h2{margin:0 0 10px 0;font-size:22px}
+.sub{opacity:.82;margin-top:6px}
+.link{margin-left:10px;text-decoration:underline}
+.card{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
+.rowCard{border:1px solid #eee;border-radius:14px;padding:12px}
+.btn{padding:10px 12px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:800}
+.btnPrimary{padding:12px 14px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:900}
+.msg{white-space:pre-wrap}
+@media (max-width:700px){
+  .h1{font-size:30px}
+  .head{flex-direction:column;align-items:stretch}
+}
+`;
