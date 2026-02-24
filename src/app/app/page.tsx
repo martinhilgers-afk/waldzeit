@@ -5,9 +5,17 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
 
+type DriverRow = {
+  user_id: string;
+  username: string | null;
+  full_name: string | null;
+  is_active: boolean | null;
+};
+
 type DayRow = {
   id: string;
   date: string; // YYYY-MM-DD
+  user_id: string; // ✅ wichtig!
   is_urlaub?: boolean | null;
   is_wetter?: boolean | null;
 };
@@ -20,6 +28,8 @@ type ItemRow = {
 type DayUI = {
   id: string;
   date: string;
+  user_id: string;
+  driver: string; // ✅ Anzeige-Name
   objekte: string[]; // unique
   isUrlaub: boolean;
   isWetter: boolean;
@@ -60,9 +70,10 @@ export default function Overview() {
   async function load() {
     setMsg("Lade...");
 
+    // ✅ 1) Workdays inkl. user_id laden
     const { data: dayData, error: dayErr } = await supabase
       .from("workdays")
-      .select("id,date,is_urlaub,is_wetter")
+      .select("id,date,user_id,is_urlaub,is_wetter")
       .order("date", { ascending: false })
       .limit(80);
 
@@ -75,9 +86,29 @@ export default function Overview() {
     const rawDays = ((dayData as any[]) ?? []) as DayRow[];
     const ids = rawDays.map((d) => d.id);
 
+    // ✅ 2) Fahrer-Map laden (für Anzeige-Namen pro user_id)
+    const { data: drvData, error: drvErr } = await supabase
+      .from("driver_profiles")
+      .select("user_id,username,full_name,is_active")
+      .eq("is_active", true);
+
+    // Wenn RLS/Policy blockiert: trotzdem weiter, dann werden Namen "(unbekannt)"
+    const driverMap = new Map<string, string>();
+    if (!drvErr) {
+      const drv = (((drvData as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
+      for (const r of drv) {
+        const label = (r.full_name ?? "").trim() || (r.username ?? "").trim() || r.user_id;
+        driverMap.set(r.user_id, label);
+      }
+    }
+
+    // ✅ 3) Objekte der Einsätze für diese Tage
     let itemData: ItemRow[] = [];
     if (ids.length > 0) {
-      const { data: items, error: itemErr } = await supabase.from("work_items").select("workday_id,objekt").in("workday_id", ids);
+      const { data: items, error: itemErr } = await supabase
+        .from("work_items")
+        .select("workday_id,objekt")
+        .in("workday_id", ids);
 
       if (itemErr) {
         setMsg("Fehler: " + itemErr.message);
@@ -101,9 +132,14 @@ export default function Overview() {
     const ui: DayUI[] = rawDays.map((d) => {
       const objs = map.get(d.id) ?? [];
       const uniq = Array.from(new Set(objs)).sort((a, b) => a.localeCompare(b));
+
+      const driverLabel = driverMap.get(d.user_id) ?? "(unbekannt)";
+
       return {
         id: d.id,
         date: d.date,
+        user_id: d.user_id,
+        driver: driverLabel,
         objekte: uniq,
         isUrlaub: !!d.is_urlaub,
         isWetter: !!d.is_wetter,
@@ -165,14 +201,12 @@ export default function Overview() {
 
     setMsg("Lösche...");
 
-    // 1) erst Items löschen
     const { error: delItemsErr } = await supabase.from("work_items").delete().eq("workday_id", dayId);
     if (delItemsErr) {
       setMsg("Fehler beim Löschen der Einsätze: " + delItemsErr.message);
       return;
     }
 
-    // 2) dann Workday löschen
     const { error: delDayErr } = await supabase.from("workdays").delete().eq("id", dayId);
     if (delDayErr) {
       setMsg("Fehler beim Löschen des Tages: " + delDayErr.message);
@@ -239,7 +273,11 @@ export default function Overview() {
                         <b>{fmtDE(d.date)}</b>
                       </div>
 
-                      <div style={{ marginTop: 6, opacity: 0.9 }}>
+                      {/* ✅ Fahrer + Inhalt */}
+                      <div style={{ marginTop: 6, opacity: 0.95 }}>
+                        <b>{d.driver}</b>
+                        <span style={{ opacity: 0.55 }}> · </span>
+
                         {d.isUrlaub ? (
                           <span style={{ fontWeight: 900 }}>🌴 Urlaub</span>
                         ) : d.isWetter ? (
@@ -253,7 +291,6 @@ export default function Overview() {
                     </div>
                   </Link>
 
-                  {/* ✅ Icons rechts */}
                   <div className="dayActions">
                     <Link href={`/app/day/${d.id}`} title="Bearbeiten" className="iconBtn">
                       ✏️

@@ -13,6 +13,14 @@ type ExportMode =
   | "all_range"
   | "all_object";
 
+type DriverRow = {
+  user_id: string; // uuid
+  username: string | null;
+  full_name: string | null;
+  default_machine: string | null;
+  is_active: boolean | null;
+};
+
 type DayRow = {
   id: string;
   user_id: string;
@@ -22,7 +30,6 @@ type DayRow = {
   kommentar: string | null;
   is_urlaub: boolean | null;
   is_wetter: boolean | null;
-  created_at?: string;
 };
 
 type ItemRow = {
@@ -50,8 +57,6 @@ type ItemRow = {
 
   twinch_used: boolean | null;
   twinch_h: number | null;
-
-  created_at?: string;
 };
 
 function todayISO() {
@@ -69,40 +74,42 @@ function firstOfMonthISO() {
   return `${y}-${m}-01`;
 }
 
-function ensureArrayRecords(input: unknown): Array<Record<string, any>> {
-  if (Array.isArray(input)) return input as Array<Record<string, any>>;
-  if (input && typeof input === "object") return [input as Record<string, any>];
-  return [];
+function sanitizeFilename(s: string) {
+  return s.replace(/[^\w\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
 }
 
 function csvEscape(v: any) {
-  const s = v === null || v === undefined ? "" : String(v);
-  const needsQuotes = /[",\n\r;]/.test(s);
-  const safe = s.replace(/"/g, '""');
-  return needsQuotes ? `"${safe}"` : safe;
+  if (v === null || v === undefined) return "";
+
+  const raw = String(v).trim();
+
+  // erkennt Zahlen wie: 12 | -3 | 0.5 | 3.5 | 3,5
+  const looksNumeric = /^-?\d+([.,]\d+)?$/.test(raw);
+
+  // Excel (DE): Dezimalpunkt -> Dezimalkomma (ohne Quotes, damit es Zahl bleibt)
+  const s = looksNumeric ? raw.replace(".", ",") : raw;
+
+  if (/[;\n\r"]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
 }
 
-function toCSV(input: unknown) {
-  const rows = ensureArrayRecords(input);
+function toCSV(rows: Array<Record<string, any>>) {
   const headerSet = new Set<string>();
-
   for (const r of rows) {
     if (!r) continue;
     for (const k of Object.keys(r)) headerSet.add(k);
   }
 
-  // stabile Reihenfolge: wichtige Felder zuerst
   const preferred = [
     "date",
-    "user_id",
+    "objekt",
     "driver",
+    "maschine",
     "is_urlaub",
     "is_wetter",
     "arbeitsbeginn",
     "arbeitsende",
     "tages_kommentar",
-    "objekt",
-    "maschine",
     "fahrtzeit_min",
     "mas_start",
     "mas_end",
@@ -120,7 +127,9 @@ function toCSV(input: unknown) {
     "twinch_h",
   ];
 
-  const rest = Array.from(headerSet).filter((h) => !preferred.includes(h)).sort((a, b) => a.localeCompare(b));
+  const rest = Array.from(headerSet)
+    .filter((h) => !preferred.includes(h))
+    .sort((a, b) => a.localeCompare(b));
   const headers = [...preferred.filter((h) => headerSet.has(h)), ...rest];
 
   const lines: string[] = [];
@@ -143,8 +152,10 @@ function downloadText(filename: string, text: string) {
   URL.revokeObjectURL(url);
 }
 
-function sanitizeFilename(s: string) {
-  return s.replace(/[^\w\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
+async function isAdmin() {
+  const { data, error } = await supabase.rpc("is_admin");
+  if (error) return false;
+  return data === true;
 }
 
 export default function AdminExportPage() {
@@ -158,7 +169,10 @@ export default function AdminExportPage() {
 
   const [machines, setMachines] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
-  const [drivers, setDrivers] = useState<{ id: string; label: string }[]>([]);
+  const [drivers, setDrivers] = useState<Array<{ id: string; label: string }>>([]);
+
+  // ✅ NEU: Mapping für driver Feld (user_id -> Name)
+  const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
   const [selectedMachine, setSelectedMachine] = useState("");
   const [selectedObject, setSelectedObject] = useState("");
@@ -167,31 +181,53 @@ export default function AdminExportPage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
-  async function loadIsAdmin() {
-    // robust: wenn RLS blockt -> error -> kein admin
-    const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
-    if (error) {
-      setAdmin(false);
-      return;
-    }
-    setAdmin(((data as any[]) ?? []).length > 0);
-  }
+  const needsRange = useMemo(
+    () => mode === "machine_range" || mode === "driver_range" || mode === "all_range",
+    [mode]
+  );
+  const needsMachine = useMemo(
+    () => mode === "machine_range" || mode === "machine_object",
+    [mode]
+  );
+  const needsDriver = useMemo(
+    () => mode === "driver_range" || mode === "driver_object",
+    [mode]
+  );
+  const needsObject = useMemo(
+    () => mode === "machine_object" || mode === "driver_object" || mode === "all_object",
+    [mode]
+  );
 
   async function loadSelectors() {
-    const [m, o] = await Promise.all([
+    const [m, o, d] = await Promise.all([
       supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true }),
       supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
+      supabase
+        .from("driver_profiles")
+        .select("user_id,username,full_name,is_active")
+        .eq("is_active", true)
+        .order("full_name", { ascending: true }),
     ]);
 
-    setMachines((((m.data as any[]) ?? []) as any[]).map((x) => x.name));
-    setObjects((((o.data as any[]) ?? []) as any[]).map((x) => x.name));
+    setMachines(((m.data as any[]) ?? []).map((x) => x.name));
+    setObjects(((o.data as any[]) ?? []).map((x) => x.name));
 
-    // Fahrer: distinct user_id aus workdays (Client-unique)
-    const { data: wd, error } = await supabase.from("workdays").select("user_id").limit(5000);
-    if (!error) {
-      const uniq = Array.from(new Set((((wd as any[]) ?? []) as any[]).map((x) => x.user_id).filter(Boolean)));
-      setDrivers(uniq.map((id) => ({ id, label: id })));
+    const drvRows = (((d.data as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
+
+    const drv = drvRows.map((x) => ({
+      id: x.user_id, // value ist UUID
+      label: x.full_name?.trim() || x.username?.trim() || x.user_id,
+    }));
+
+    setDrivers(drv);
+
+    // ✅ Map bauen: user_id -> label
+    const map = new Map<string, string>();
+    for (const x of drvRows) {
+      const label = x.full_name?.trim() || x.username?.trim() || x.user_id;
+      map.set(x.user_id, label);
     }
+    setDriverMap(map);
   }
 
   useEffect(() => {
@@ -202,16 +238,16 @@ export default function AdminExportPage() {
         return;
       }
       setMeName(me.firstName || me.email || "");
-      await loadIsAdmin();
-      await loadSelectors();
+
+      const ok = await isAdmin();
+      setAdmin(ok);
+
+      if (ok) {
+        await loadSelectors();
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const needsRange = useMemo(() => mode === "machine_range" || mode === "driver_range" || mode === "all_range", [mode]);
-  const needsMachine = useMemo(() => mode === "machine_range" || mode === "machine_object", [mode]);
-  const needsDriver = useMemo(() => mode === "driver_range" || mode === "driver_object", [mode]);
-  const needsObject = useMemo(() => mode === "machine_object" || mode === "driver_object" || mode === "all_object", [mode]);
 
   async function runExport() {
     if (admin !== true) {
@@ -227,10 +263,10 @@ export default function AdminExportPage() {
     setLoading(true);
     setMsg("Export wird geladen...");
 
-    // 1) Workdays holen (gefiltert)
+    // 1) Workdays (gefiltert)
     let q = supabase
       .from("workdays")
-      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,created_at")
+      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter")
       .order("date", { ascending: true });
 
     if (needsRange) q = q.gte("date", from).lte("date", to);
@@ -246,7 +282,6 @@ export default function AdminExportPage() {
     const days: DayRow[] = ((dayData as any[]) ?? []) as DayRow[];
     const dayIds = days.map((d) => d.id);
 
-    // Wenn keine Tage: trotzdem exportieren (leere Datei)
     if (dayIds.length === 0) {
       const filename = sanitizeFilename(`export_${mode}__leer.csv`);
       downloadText(filename, toCSV([]));
@@ -256,11 +291,10 @@ export default function AdminExportPage() {
     }
 
     // 2) Items holen (für diese Workdays)
-    let items: ItemRow[] = [];
     const { data: itemData, error: itemErr } = await supabase
       .from("work_items")
       .select(
-        "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h,created_at"
+        "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
       )
       .in("workday_id", dayIds);
 
@@ -269,7 +303,8 @@ export default function AdminExportPage() {
       setMsg("Fehler Work Items: " + itemErr.message);
       return;
     }
-    items = ((itemData as any[]) ?? []) as ItemRow[];
+
+    let items: ItemRow[] = ((itemData as any[]) ?? []) as ItemRow[];
 
     // 3) Filter auf Maschine/Objekt (wenn nötig)
     if (needsMachine) {
@@ -286,19 +321,21 @@ export default function AdminExportPage() {
 
     const itemRows: Array<Record<string, any>> = items.map((it) => {
       const d = dayMap.get(it.workday_id);
+      const drvName = d?.user_id ? (driverMap.get(d.user_id) ?? "") : "";
+
       return {
         date: d?.date ?? "",
-        user_id: d?.user_id ?? "",
+        objekt: it.objekt ?? "",
+        driver: drvName,
+        maschine: it.maschine ?? "",
+
         is_urlaub: d?.is_urlaub ?? false,
         is_wetter: d?.is_wetter ?? false,
         arbeitsbeginn: d?.arbeitsbeginn ?? "",
         arbeitsende: d?.arbeitsende ?? "",
         tages_kommentar: d?.kommentar ?? "",
 
-        objekt: it.objekt ?? "",
-        maschine: it.maschine ?? "",
         fahrtzeit_min: it.fahrtzeit_min ?? "",
-
         mas_start: it.mas_start ?? "",
         mas_end: it.mas_end ?? "",
         maschinenstunden_h: it.maschinenstunden_h ?? "",
@@ -314,16 +351,12 @@ export default function AdminExportPage() {
         adblue_l: it.adblue_l ?? "",
 
         einsatz_kommentar: it.kommentar ?? "",
-
         twinch_used: it.twinch_used ?? false,
         twinch_h: it.twinch_h ?? "",
       };
     });
 
-    // 5) Urlaub/Wetter Tage zusätzlich exportieren (auch wenn Items existieren)
-    // - Aber: wenn du nach Maschine/Objekt filterst, wollen wir nur "Special-Days" exportieren,
-    //   wenn sie in den Filter passen? Da sie keine Items haben, passen sie NICHT zu Maschine/Objekt,
-    //   also lassen wir sie weg, außer bei all_range/driver_range (ohne machine/object Filter).
+    // 5) Special-Days (Urlaub/Wetter) nur dann exportieren, wenn KEIN item-filter aktiv ist
     const hasItemFilter = needsMachine || needsObject;
     const specialDayRows: Array<Record<string, any>> = hasItemFilter
       ? []
@@ -331,14 +364,16 @@ export default function AdminExportPage() {
           .filter((d) => (d.is_urlaub ?? false) || (d.is_wetter ?? false))
           .map((d) => ({
             date: d.date,
-            user_id: d.user_id,
+            objekt: "",
+            driver: driverMap.get(d.user_id) ?? "",
+            maschine: "",
+
             is_urlaub: d.is_urlaub ?? false,
             is_wetter: d.is_wetter ?? false,
             arbeitsbeginn: d.arbeitsbeginn ?? "",
             arbeitsende: d.arbeitsende ?? "",
             tages_kommentar: d.kommentar ?? "",
-            objekt: "",
-            maschine: "",
+
             fahrtzeit_min: "",
             mas_start: "",
             mas_end: "",
@@ -356,24 +391,27 @@ export default function AdminExportPage() {
             twinch_h: "",
           }));
 
-    // Doppelte vermeiden: Special-Day hat i.d.R. keine Items, aber sicher ist sicher:
-    const specialKey = new Set(specialDayRows.map((r) => `${r.date}__${r.user_id}`));
-    const filteredItemRows = itemRows.filter((r) => !specialKey.has(`${r.date}__${r.user_id}`));
+    const finalRows =
+      itemRows.length === 0 ? (hasItemFilter ? [] : specialDayRows) : [...itemRows, ...specialDayRows];
 
-    const finalRows = [...filteredItemRows, ...specialDayRows];
-
-    // 6) Dateiname
     const labelParts: string[] = [mode];
     if (needsRange) labelParts.push(`${from}_bis_${to}`);
     if (needsMachine) labelParts.push(`maschine_${selectedMachine}`);
-    if (needsDriver) labelParts.push(`fahrer_${selectedDriver}`);
+    if (needsDriver) {
+      const label = drivers.find((x) => x.id === selectedDriver)?.label || selectedDriver;
+      labelParts.push(`fahrer_${label}`);
+    }
     if (needsObject) labelParts.push(`objekt_${selectedObject}`);
 
     const filename = sanitizeFilename(`export_${labelParts.join("__")}.csv`);
 
     downloadText(filename, toCSV(finalRows));
     setLoading(false);
-    setMsg(`✅ Export fertig: ${finalRows.length} Zeilen`);
+    setMsg(
+      finalRows.length === 0
+        ? "✅ Keine Daten im Filter. Leere CSV exportiert."
+        : `✅ Export fertig: ${finalRows.length} Zeilen`
+    );
   }
 
   if (admin === null) {
@@ -389,7 +427,7 @@ export default function AdminExportPage() {
     return (
       <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
         <h1 style={{ margin: 0 }}>Admin · Export</h1>
-        <p style={{ marginTop: 10 }}>❌ Kein Admin-Zugriff.</p>
+        <p style={{ marginTop: 10, color: "crimson" }}>❌ Kein Admin-Zugriff.</p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
           <Link href="/admin">
             <button style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "#fff", fontWeight: 800 }}>
@@ -456,20 +494,6 @@ export default function AdminExportPage() {
           </div>
         )}
 
-        {needsMachine && (
-          <label className="field" style={{ marginTop: 10 }}>
-            Maschine
-            <select value={selectedMachine} onChange={(e) => setSelectedMachine(e.target.value)} className="control">
-              <option value="">Bitte wählen…</option>
-              {machines.map((x) => (
-                <option key={x} value={x}>
-                  {x}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-
         {needsDriver && (
           <label className="field" style={{ marginTop: 10 }}>
             Fahrer
@@ -478,6 +502,20 @@ export default function AdminExportPage() {
               {drivers.map((x) => (
                 <option key={x.id} value={x.id}>
                   {x.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {needsMachine && (
+          <label className="field" style={{ marginTop: 10 }}>
+            Maschine
+            <select value={selectedMachine} onChange={(e) => setSelectedMachine(e.target.value)} className="control">
+              <option value="">Bitte wählen…</option>
+              {machines.map((x) => (
+                <option key={x} value={x}>
+                  {x}
                 </option>
               ))}
             </select>
@@ -505,8 +543,7 @@ export default function AdminExportPage() {
         {msg && <p className="msg">{msg}</p>}
 
         <div className="hint" style={{ marginTop: 12 }}>
-          Hinweis: Fahrer werden aktuell als <b>user_id</b> angezeigt. Wenn du willst, bauen wir als nächstes eine Tabelle
-          <b> users_profile (user_id, name)</b>, damit im Dropdown echte Namen stehen.
+          Hinweis: Fahrer kommen aus <b>driver_profiles</b> (driver = full_name/username anhand workdays.user_id).
         </div>
       </section>
 
@@ -521,7 +558,6 @@ const baseStyles = `
 .h1{margin:0;font-size:32px;line-height:1.1}
 .h2{margin:0 0 10px 0;font-size:22px}
 .sub{opacity:.82;margin-top:6px}
-
 .card{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .field{display:block}
