@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
-import { useSearchParams } from "next/navigation";
 
 type WorkItem = {
   key: string; // nur UI
@@ -17,11 +16,11 @@ type WorkItem = {
   mas_start: string;
   mas_end: string;
 
-  // NEU: zuletzt gespeichertes MAS Ende (für Warnung)
-  last_mas_end: number | null;
-
-  // Anzeige / Export (aus Beginn/Ende berechnet)
+  // nur Anzeige (Delta aus Start/Ende)
   maschinenstunden_h: string;
+
+  // für Warnung: letzter bekannter Endstand dieser Maschine
+  last_mas_end: number | null;
 
   unterhalt_h: string;
   reparatur_h: string;
@@ -35,7 +34,7 @@ type WorkItem = {
 
   kommentar: string;
 
-  warnung: string; // UI: Maschinencheck
+  warnung: string; // UI
 };
 
 function uid() {
@@ -92,8 +91,8 @@ export default function NewWorkday() {
       fahrtzeit_min: "",
       mas_start: "",
       mas_end: "",
-      last_mas_end: null,
       maschinenstunden_h: "",
+      last_mas_end: null,
       unterhalt_h: "",
       reparatur_h: "",
       motormanuel_h: "",
@@ -109,9 +108,7 @@ export default function NewWorkday() {
 
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
-const searchParams = typeof window !== "undefined"
-  ? new URLSearchParams(window.location.search)
-  : null;
+
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -121,52 +118,7 @@ const searchParams = typeof window !== "undefined"
       }
       setMeName(me.firstName);
       setUserId(me.id);
-const dateFromUrl = searchParams?.get("date");
-if (dateFromUrl) {
-  setDate(dateFromUrl);
 
-  // bestehenden Workday + Items laden
-  const { data: wd, error } = await supabase
-    .from("workdays")
-    .select("id,arbeitsbeginn,arbeitsende,kommentar,work_items(*)")
-    .eq("user_id", me.id)
-    .eq("date", dateFromUrl)
-    .limit(1);
-
-  if (!error && wd && wd.length > 0) {
-    const row: any = wd[0];
-    setArbeitsbeginn(row.arbeitsbeginn ?? "");
-    setArbeitsende(row.arbeitsende ?? "");
-    setTagesKommentar(row.kommentar ?? "");
-
-    const wi: any[] = row.work_items ?? [];
-    if (wi.length > 0) {
-      setItems(
-        wi.map((x) => ({
-          key: uid(),
-          objekt: x.objekt ?? "",
-          maschine: x.maschine ?? "",
-          fahrtzeit_min: x.fahrtzeit_min?.toString?.() ?? "",
-          mas_start: x.mas_start?.toString?.() ?? "",
-          mas_end: x.mas_end?.toString?.() ?? "",
-          last_mas_end: null,
-          maschinenstunden_h: x.maschinenstunden_h?.toString?.() ?? "",
-          unterhalt_h: x.unterhalt_h?.toString?.() ?? "",
-          reparatur_h: x.reparatur_h?.toString?.() ?? "",
-          motormanuel_h: x.motormanuel_h?.toString?.() ?? "",
-          umsetzen_h: x.umsetzen_h?.toString?.() ?? "",
-          sonstiges_h: x.sonstiges_h?.toString?.() ?? "",
-          sonstiges_beschreibung: x.sonstiges_beschreibung ?? "",
-          diesel_l: x.diesel_l?.toString?.() ?? "",
-          adblue_l: x.adblue_l?.toString?.() ?? "",
-          kommentar: x.kommentar ?? "",
-          warnung: "",
-        }))
-      );
-    }
-  }
-}
-      // Stammdaten laden (für Dropdowns)
       const [o, m] = await Promise.all([
         supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
         supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true }),
@@ -191,8 +143,8 @@ if (dateFromUrl) {
         fahrtzeit_min: "",
         mas_start: "",
         mas_end: "",
-        last_mas_end: null,
         maschinenstunden_h: "",
+        last_mas_end: null,
         unterhalt_h: "",
         reparatur_h: "",
         motormanuel_h: "",
@@ -225,7 +177,6 @@ if (dateFromUrl) {
       .limit(60);
 
     if (dayErr || !days || days.length === 0) return;
-
     const ids = (days as any[]).map((d) => d.id);
 
     const { data: last, error: itemErr } = await supabase
@@ -251,7 +202,7 @@ if (dateFromUrl) {
     }
   }
 
-  // ✅ MAS Beginn Vorschlag + last_mas_end merken (benutzerübergreifend)
+  // ✅ MAS Beginn Vorschlag: letztes mas_end dieser Maschine (benutzerübergreifend)
   async function suggestMasStart(maschineValue: string, itemKey: string) {
     const m = maschineValue.trim();
     if (!m) return;
@@ -265,12 +216,14 @@ if (dateFromUrl) {
       .limit(1);
 
     if (error || !data || data.length === 0) {
+      // kein last value -> trotzdem last_mas_end resetten
       updateItem(itemKey, { last_mas_end: null });
       return;
     }
 
     const lastEnd = (data as any[])[0]?.mas_end;
-    if (typeof lastEnd !== "number") {
+    const lastEndNum = typeof lastEnd === "number" ? lastEnd : Number(lastEnd);
+    if (!Number.isFinite(lastEndNum)) {
       updateItem(itemKey, { last_mas_end: null });
       return;
     }
@@ -279,32 +232,44 @@ if (dateFromUrl) {
       prev.map((it) => {
         if (it.key !== itemKey) return it;
 
-        // lastEnd immer merken
-        if (!it.mas_start.trim()) {
-          // und vorschlagen
-          return { ...it, last_mas_end: lastEnd, mas_start: String(lastEnd) };
-        }
-        return { ...it, last_mas_end: lastEnd };
+        // last_mas_end immer merken
+        const base = { ...it, last_mas_end: lastEndNum };
+
+        // nur vorschlagen, wenn leer
+        if (it.mas_start.trim()) return base;
+        return { ...base, mas_start: String(lastEndNum) };
       })
     );
   }
 
-  // ✅ Checks:
-  // - Ende < Beginn => ❌ Block
-  // - Delta > 24 => ❌ Block
-  // - Beginn < zuletzt gespeichertes Ende => ⚠️ Warnung
-  // - Tages-Summe pro Maschine >24 => ❌ Block, >16 => ⚠️ Hinweis
-  async function checkMachineHoursForDay(itemKey: string, itSnapshot: WorkItem) {
-    const m = itSnapshot.maschine.trim();
+  function calcMasHours(it: WorkItem) {
+    const s = toNumOrNull(it.mas_start);
+    const e = toNumOrNull(it.mas_end);
+    if (s === null || e === null) return null;
+    return e - s;
+  }
+
+  // ✅ 2 Warnungen:
+  // 1) mas_start < last_mas_end  => Warnung
+  // 2) Tagessumme pro Maschine > 24 => Block
+  async function checkMachineHoursForDay(itemKey: string, it: WorkItem) {
+    const m = it.maschine.trim();
     if (!m || !date) {
       updateItem(itemKey, { warnung: "" });
       return;
     }
 
-    const s = toNumOrNull(itSnapshot.mas_start);
-    const e = toNumOrNull(itSnapshot.mas_end);
+    const s = toNumOrNull(it.mas_start);
+    const e = toNumOrNull(it.mas_end);
 
-    // Wenn noch nicht beide Zahlen da sind: keine Warnung
+    // Noch unvollständig -> nur ggf. "kleiner als zuletzt" prüfen, wenn mas_start schon da ist
+    if (s !== null && it.last_mas_end !== null && s < it.last_mas_end) {
+      updateItem(itemKey, {
+        warnung: `⚠️ Warnung: MAS Beginn (${s}) ist kleiner als zuletzt gespeichert (${it.last_mas_end}). Bitte prüfen.`,
+      });
+      return;
+    }
+
     if (s === null || e === null) {
       updateItem(itemKey, { warnung: "" });
       return;
@@ -315,45 +280,47 @@ if (dateFromUrl) {
       return;
     }
 
-    const delta = e - s;
+    const deltaHours = e - s;
 
-    if (delta > 24) {
-      updateItem(itemKey, { warnung: `❌ Block: Maschinenstunden für einen Einsatz sind ${delta.toFixed(2)}h (>24h).` });
-      return;
-    }
-
-    let localWarn = "";
-    if (typeof itSnapshot.last_mas_end === "number" && Number.isFinite(itSnapshot.last_mas_end)) {
-      if (s < itSnapshot.last_mas_end) {
-        localWarn = `⚠️ Hinweis: MAS Beginn (${s}) ist kleiner als zuletzt gespeichert (${itSnapshot.last_mas_end}). Stimmt die Maschine?`;
-      }
-    }
-
+    // Tages-Summe (RPC liefert bereits gespeicherte Stunden am Tag)
     const { data, error } = await supabase.rpc("machine_hours_total", {
       p_date: date,
       p_maschine: m,
     });
 
     if (error) {
-      updateItem(itemKey, { warnung: localWarn });
+      updateItem(itemKey, { warnung: "" });
       return;
     }
 
     const total = typeof data === "number" ? data : Number(data);
     if (!Number.isFinite(total)) {
-      updateItem(itemKey, { warnung: localWarn });
+      updateItem(itemKey, { warnung: "" });
       return;
     }
 
-    const sum = total + delta;
+    const sum = total + deltaHours;
 
+    // Priorität: Block >24
     if (sum > 24) {
       updateItem(itemKey, { warnung: `❌ Block: Maschine wäre am ${date} insgesamt ca. ${sum.toFixed(2)}h (>24h)` });
-    } else if (sum > 16) {
-      updateItem(itemKey, { warnung: `⚠️ Hinweis: Maschine kommt am ${date} auf ca. ${sum.toFixed(2)}h` });
-    } else {
-      updateItem(itemKey, { warnung: localWarn });
+      return;
     }
+
+    // "kleiner als zuletzt" Warnung bleibt sichtbar (wenn zutreffend), sonst optional Hinweis >16
+    if (it.last_mas_end !== null && s < it.last_mas_end) {
+      updateItem(itemKey, {
+        warnung: `⚠️ Warnung: MAS Beginn (${s}) ist kleiner als zuletzt gespeichert (${it.last_mas_end}). Bitte prüfen.`,
+      });
+      return;
+    }
+
+    if (sum > 16) {
+      updateItem(itemKey, { warnung: `⚠️ Hinweis: Maschine kommt am ${date} auf ca. ${sum.toFixed(2)}h` });
+      return;
+    }
+
+    updateItem(itemKey, { warnung: "" });
   }
 
   const validationErrors = useMemo(() => {
@@ -383,9 +350,6 @@ if (dateFromUrl) {
       }
       if (s !== null && e !== null && e < s) {
         errs.push(`Einsatz ${n}: MAS Ende darf nicht kleiner als MAS Beginn sein.`);
-      }
-      if (s !== null && e !== null && e - s > 24) {
-        errs.push(`Einsatz ${n}: MAS Differenz > 24h ist nicht erlaubt.`);
       }
 
       if (it.warnung.includes("❌ Block")) {
@@ -457,7 +421,6 @@ if (dateFromUrl) {
 
         mas_start: s,
         mas_end: e,
-
         maschinenstunden_h: delta !== null && Number.isFinite(delta) ? delta : null,
 
         unterhalt_h: toNumOrNull(it.unterhalt_h),
@@ -485,43 +448,38 @@ if (dateFromUrl) {
     setMsg("✅ Gespeichert!");
     setTimeout(() => {
       location.href = "/app";
-    }, 400);
+    }, 350);
   }
 
   return (
-    <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+    <main className="wrap">
+      <header className="head">
         <div>
-          <h1 style={{ margin: 0 }}>Neuer Tag</h1>
-          <div style={{ opacity: 0.8, marginTop: 6 }}>
+          <h1 className="h1">Neuer Tag</h1>
+          <div className="sub">
             Angemeldet als: <b>{meName || "…"}</b>{" "}
-            <Link href="/profile" style={{ marginLeft: 10 }}>
+            <Link href="/profile" className="link">
               Profil
             </Link>
           </div>
         </div>
 
         <Link href="/app">
-          <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Zur Übersicht</button>
+          <button className="btn">Zur Übersicht</button>
         </Link>
       </header>
 
-      <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, marginTop: 12 }}>
-        <h2 style={{ marginTop: 0 }}>Tag</h2>
+      <section className="card">
+        <h2 className="h2">Tag</h2>
 
-        <label style={{ display: "block", marginTop: 12 }}>Datum</label>
+        <label className="lbl">Datum</label>
 
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 6 }}>
-          <div style={{ width: "100%", maxWidth: 360 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button
-                type="button"
-                onClick={() => setDate(todayISO())}
-                style={{ flex: 1, padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", fontWeight: 800, background: "#fff" }}
-              >
+        <div className="dateBox">
+          <div className="dateInner">
+            <div className="row2">
+              <button type="button" onClick={() => setDate(todayISO())} className="btnWide">
                 Heute
               </button>
-
               <button
                 type="button"
                 onClick={() => {
@@ -532,66 +490,63 @@ if (dateFromUrl) {
                   const day = String(d.getDate()).padStart(2, "0");
                   setDate(`${y}-${m}-${day}`);
                 }}
-                style={{ flex: 1, padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", fontWeight: 800, background: "#fff" }}
+                className="btnWide"
               >
                 Gestern
               </button>
             </div>
 
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              style={{ width: "100%", padding: "10px 12px", fontSize: 16, borderRadius: 10, border: "1px solid #ddd", background: "#fff" }}
-            />
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="control" />
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-          <label>
+        <div className="row2" style={{ marginTop: 12 }}>
+          <label className="field">
             Arbeitsbeginn
-            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-              <input type="time" value={arbeitsbeginn} onChange={(e) => setArbeitsbeginn(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16 }} />
-              <button type="button" onClick={() => setArbeitsbeginn(nowHHMM())} style={{ padding: 12 }}>
+            <div className="rowBtn">
+              <input type="time" value={arbeitsbeginn} onChange={(e) => setArbeitsbeginn(e.target.value)} className="control" />
+              <button type="button" onClick={() => setArbeitsbeginn(nowHHMM())} className="btnSm">
                 Jetzt
               </button>
             </div>
           </label>
 
-          <label>
+          <label className="field">
             Arbeitsende
-            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-              <input type="time" value={arbeitsende} onChange={(e) => setArbeitsende(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16 }} />
-              <button type="button" onClick={() => setArbeitsende(nowHHMM())} style={{ padding: 12 }}>
+            <div className="rowBtn">
+              <input type="time" value={arbeitsende} onChange={(e) => setArbeitsende(e.target.value)} className="control" />
+              <button type="button" onClick={() => setArbeitsende(nowHHMM())} className="btnSm">
                 Jetzt
               </button>
             </div>
           </label>
         </div>
 
-        <label style={{ display: "block", marginTop: 12 }}>
+        <label className="field" style={{ marginTop: 12 }}>
           Tages-Kommentar
-          <textarea value={tagesKommentar} onChange={(e) => setTagesKommentar(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 80 }} />
+          <textarea value={tagesKommentar} onChange={(e) => setTagesKommentar(e.target.value)} className="control" style={{ minHeight: 90 }} />
         </label>
       </section>
 
       <section style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-          <h2 style={{ margin: 0 }}>Einsätze</h2>
-          <button onClick={addItem} style={{ padding: 12, borderRadius: 12, border: "1px solid #ddd", fontWeight: 800 }}>
+        <div className="head2">
+          <h2 className="h2" style={{ margin: 0 }}>
+            Einsätze
+          </h2>
+          <button onClick={addItem} className="btn">
             + Einsatz hinzufügen
           </button>
         </div>
 
-        <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+        <div className="grid">
           {items.map((it, idx) => (
-            <details key={it.key} open={idx === 0} style={{ border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>
+            <details key={it.key} open={idx === 0} className="card">
+              <summary className="sum">
                 Einsatz {idx + 1}: {it.objekt || "Objekt"} / {it.maschine || "Maschine"}
               </summary>
 
-              <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                <label>
+              <div className="inner">
+                <label className="field">
                   Objekt *
                   <select
                     value={it.objekt}
@@ -600,7 +555,7 @@ if (dateFromUrl) {
                       updateItem(it.key, { objekt: v });
                       if (v.trim().length >= 2) suggestFahrtzeit(v, it.key);
                     }}
-                    style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
+                    className="control"
                   >
                     <option value="">Bitte wählen…</option>
                     {objectOptions.map((name) => (
@@ -611,26 +566,20 @@ if (dateFromUrl) {
                   </select>
                 </label>
 
-                <label>
+                <label className="field">
                   Maschine *
                   <select
                     value={it.maschine}
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const v = e.target.value;
+                      // warnung reset, last_mas_end wird durch suggestMasStart gesetzt
+                      updateItem(it.key, { maschine: v, warnung: "", last_mas_end: null });
+                      if (v) await suggestMasStart(v, it.key);
 
-                      // maschine setzen + warnung reset
-                      updateItem(it.key, { maschine: v, warnung: "" });
-
-                      if (v) {
-                        // lastEnd merken + ggf. mas_start vorschlagen
-                        suggestMasStart(v, it.key);
-                      }
-
-                      // Check mit Snapshot
-                      const snap = { ...it, maschine: v };
-                      checkMachineHoursForDay(it.key, snap);
+                      // danach nochmal checken (mit aktuellem it; last_mas_end kommt async, daher checken wir nochmal bei Start/Ende-Änderung)
+                      // (Kein harter Check hier nötig)
                     }}
-                    style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
+                    className="control"
                   >
                     <option value="">Bitte wählen…</option>
                     {machineOptions.map((name) => (
@@ -641,152 +590,127 @@ if (dateFromUrl) {
                   </select>
                 </label>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
+                <div className="row2">
+                  <label className="field">
                     Fahrtzeit (Min.)
-                    <input
-                      value={it.fahrtzeit_min}
-                      onChange={(e) => updateItem(it.key, { fahrtzeit_min: e.target.value })}
-                      inputMode="numeric"
-                      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                    />
+                    <input value={it.fahrtzeit_min} onChange={(e) => updateItem(it.key, { fahrtzeit_min: e.target.value })} inputMode="numeric" className="control" />
                   </label>
 
-                  <label>
+                  <label className="field">
                     MAS Stunden (h) automatisch
-                    <input
-                      value={it.maschinenstunden_h}
-                      readOnly
-                      placeholder="(aus MAS Beginn/Ende)"
-                      style={{
-                        width: "100%",
-                        padding: 12,
-                        fontSize: 16,
-                        marginTop: 6,
-                        background: "#f7f7f7",
-                        border: "1px solid #ddd",
-                        borderRadius: 8,
-                      }}
-                    />
+                    <input value={it.maschinenstunden_h} readOnly placeholder="(aus MAS Beginn/Ende)" className="control ro" />
                   </label>
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
+                <div className="row2">
+                  <label className="field">
                     MAS Beginn
                     <input
                       value={it.mas_start}
                       onChange={(e) => {
                         const v = e.target.value;
-                        const s = toNumOrNull(v);
-                        const eNum = toNumOrNull(it.mas_end);
-                        const delta = s !== null && eNum !== null ? eNum - s : null;
+                        const next = { ...it, mas_start: v };
+                        const delta = calcMasHours(next);
 
                         updateItem(it.key, {
                           mas_start: v,
                           maschinenstunden_h: delta === null ? "" : String(delta),
                         });
 
-                        const snap = { ...it, mas_start: v, maschinenstunden_h: delta === null ? "" : String(delta) };
-                        checkMachineHoursForDay(it.key, snap);
+                        // check mit "next" (wichtig!)
+                        checkMachineHoursForDay(it.key, next);
                       }}
                       inputMode="decimal"
                       placeholder="z.B. 2450.5"
-                      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
+                      className="control"
                     />
                   </label>
 
-                  <label>
+                  <label className="field">
                     MAS Ende
                     <input
                       value={it.mas_end}
                       onChange={(e) => {
                         const v = e.target.value;
-                        const s = toNumOrNull(it.mas_start);
-                        const eNum = toNumOrNull(v);
-                        const delta = s !== null && eNum !== null ? eNum - s : null;
+                        const next = { ...it, mas_end: v };
+                        const delta = calcMasHours(next);
 
                         updateItem(it.key, {
                           mas_end: v,
                           maschinenstunden_h: delta === null ? "" : String(delta),
                         });
 
-                        const snap = { ...it, mas_end: v, maschinenstunden_h: delta === null ? "" : String(delta) };
-                        checkMachineHoursForDay(it.key, snap);
+                        checkMachineHoursForDay(it.key, next);
                       }}
                       inputMode="decimal"
                       placeholder="z.B. 2456.0"
-                      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
+                      className="control"
                     />
                   </label>
                 </div>
 
-                {it.warnung && (
-                  <div style={{ whiteSpace: "pre-wrap", color: it.warnung.includes("❌") ? "crimson" : "darkorange" }}>
-                    {it.warnung}
-                  </div>
-                )}
+                {it.warnung && <div className={it.warnung.includes("❌") ? "warn bad" : "warn"}>{it.warnung}</div>}
 
-                <details>
-                  <summary style={{ cursor: "pointer", fontWeight: 800 }}>Tätigkeiten / Diesel / Details</summary>
-
-                  <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <label>
+                <details className="subCard">
+                  <summary className="sum2">Tätigkeiten / Diesel / Details</summary>
+                  <div className="inner">
+                    <div className="row2">
+                      <label className="field">
                         Unterhalt (h)
-                        <input value={it.unterhalt_h} onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.unterhalt_h} onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })} inputMode="decimal" className="control" />
                       </label>
-
-                      <label>
+                      <label className="field">
                         Reparatur (h)
-                        <input value={it.reparatur_h} onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.reparatur_h} onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })} inputMode="decimal" className="control" />
                       </label>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <label>
+                    <div className="row2">
+                      <label className="field">
                         Motormanuel (h)
-                        <input value={it.motormanuel_h} onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.motormanuel_h} onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })} inputMode="decimal" className="control" />
                       </label>
-
-                      <label>
+                      <label className="field">
                         Umsetzen (h)
-                        <input value={it.umsetzen_h} onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.umsetzen_h} onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })} inputMode="decimal" className="control" />
                       </label>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <label>
+                    <div className="row2">
+                      <label className="field">
                         Sonstiges (h)
-                        <input value={it.sonstiges_h} onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.sonstiges_h} onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })} inputMode="decimal" className="control" />
                       </label>
-
-                      <label>
+                      <label className="field">
                         Sonstiges Beschreibung
-                        <input value={it.sonstiges_beschreibung} onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })} placeholder="z.B. Kette wechseln" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input
+                          value={it.sonstiges_beschreibung}
+                          onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })}
+                          placeholder="z.B. Kette wechseln"
+                          className="control"
+                        />
                       </label>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <label>
+                    <div className="row2">
+                      <label className="field">
                         Diesel (L)
-                        <input value={it.diesel_l} onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.diesel_l} onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })} inputMode="decimal" className="control" />
                       </label>
-
-                      <label>
+                      <label className="field">
                         AdBlue (L)
-                        <input value={it.adblue_l} onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
+                        <input value={it.adblue_l} onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })} inputMode="decimal" className="control" />
                       </label>
                     </div>
 
-                    <label>
+                    <label className="field">
                       Einsatz Kommentar
-                      <textarea value={it.kommentar} onChange={(e) => updateItem(it.key, { kommentar: e.target.value })} style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 70 }} />
+                      <textarea value={it.kommentar} onChange={(e) => updateItem(it.key, { kommentar: e.target.value })} className="control" style={{ minHeight: 80 }} />
                     </label>
                   </div>
                 </details>
 
-                <button type="button" onClick={() => removeItem(it.key)} style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", width: "fit-content" }}>
+                <button type="button" onClick={() => removeItem(it.key)} className="btnSm" style={{ width: "fit-content" }}>
                   Einsatz löschen
                 </button>
               </div>
@@ -796,12 +720,201 @@ if (dateFromUrl) {
       </section>
 
       <div style={{ marginTop: 14 }}>
-        <button onClick={save} disabled={saving} style={{ padding: 14, fontSize: 16, fontWeight: 900, borderRadius: 12, border: "1px solid #ddd" }}>
+        <button onClick={save} disabled={saving} className="btnPrimary">
           {saving ? "Speichern..." : "Speichern"}
         </button>
 
-        {msg && <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>{msg}</pre>}
+        {msg && <pre className="msg">{msg}</pre>}
       </div>
+
+      <style jsx>{`
+        .wrap {
+          max-width: 900px;
+          margin: 24px auto;
+          padding: 12px;
+        }
+        .head {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }
+        .h1 {
+          margin: 0;
+          font-size: 36px;
+          line-height: 1.1;
+        }
+        .h2 {
+          margin: 0 0 10px 0;
+          font-size: 26px;
+        }
+        .sub {
+          opacity: 0.82;
+          margin-top: 6px;
+        }
+        .link {
+          margin-left: 10px;
+          text-decoration: underline;
+        }
+
+        .card {
+          border: 1px solid #eee;
+          border-radius: 16px;
+          padding: 14px;
+          margin-top: 12px;
+          background: #fff;
+        }
+
+        .lbl {
+          display: block;
+          margin-top: 8px;
+          font-weight: 700;
+        }
+
+        .dateBox {
+          display: flex;
+          justify-content: center;
+          margin-top: 6px;
+        }
+        .dateInner {
+          width: 100%;
+          max-width: 360px;
+        }
+
+        .head2 {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .grid {
+          display: grid;
+          gap: 12px;
+          margin-top: 12px;
+        }
+
+        .sum {
+          cursor: pointer;
+          font-weight: 900;
+          font-size: 16px;
+        }
+        .sum2 {
+          cursor: pointer;
+          font-weight: 800;
+        }
+
+        .inner {
+          display: grid;
+          gap: 10px;
+          margin-top: 12px;
+        }
+
+        .row2 {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .rowBtn {
+          display: flex;
+          gap: 8px;
+          margin-top: 6px;
+          align-items: center;
+        }
+
+        .field {
+          display: block;
+        }
+
+        .control {
+          width: 100%;
+          padding: 12px;
+          font-size: 16px;
+          margin-top: 6px;
+          border-radius: 12px;
+          border: 1px solid #d9d9d9;
+          background: #fff;
+          box-sizing: border-box;
+        }
+        .control:focus {
+          outline: none;
+          border-color: #bdbdbd;
+        }
+        .ro {
+          background: #f6f6f6;
+        }
+
+        .btn {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 800;
+        }
+        .btnWide {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 900;
+        }
+        .btnSm {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .btnPrimary {
+          padding: 14px 16px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 900;
+          font-size: 16px;
+        }
+
+        .warn {
+          white-space: pre-wrap;
+          color: darkorange;
+          font-weight: 700;
+        }
+        .warn.bad {
+          color: crimson;
+        }
+
+        .subCard {
+          border: 1px solid #eee;
+          border-radius: 14px;
+          padding: 12px;
+          background: #fff;
+        }
+
+        .msg {
+          margin-top: 10px;
+          white-space: pre-wrap;
+          background: #fafafa;
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 10px;
+        }
+
+        @media (max-width: 700px) {
+          .h1 {
+            font-size: 30px;
+          }
+          .row2 {
+            grid-template-columns: 1fr;
+          }
+          .head {
+            flex-direction: column;
+            align-items: stretch;
+          }
+        }
+      `}</style>
     </main>
   );
 }
