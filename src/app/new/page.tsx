@@ -348,18 +348,77 @@ export default function NewWorkday() {
       <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, marginTop: 12 }}>
         <h2 style={{ marginTop: 0 }}>Tag</h2>
 
-        <label style={{ display: "block", marginTop: 8 }}>
-          Datum
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-          />
-        </label>
+{/* ===== DATUM ===== */}
+<label style={{ display: "block", marginTop: 12 }}>
+  Datum
+</label>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-          <label>
+<div
+  style={{
+    display: "flex",
+    justifyContent: "center",
+    marginTop: 6,
+  }}
+>
+  <div style={{ width: "100%", maxWidth: 360 }}>
+    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      <button
+        type="button"
+        onClick={() => setDate(todayISO())}
+        style={{
+          flex: 1,
+          padding: "10px 12px",
+          borderRadius: 12,
+          border: "1px solid #ddd",
+          fontWeight: 800,
+          background: "#fff",
+        }}
+      >
+        Heute
+      </button>
+
+      <button
+        type="button"
+        onClick={() => {
+          const d = new Date();
+          d.setDate(d.getDate() - 1);
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, "0");
+          const day = String(d.getDate()).padStart(2, "0");
+          setDate(`${y}-${m}-${day}`);
+        }}
+        style={{
+          flex: 1,
+          padding: "10px 12px",
+          borderRadius: 12,
+          border: "1px solid #ddd",
+          fontWeight: 800,
+          background: "#fff",
+        }}
+      >
+        Gestern
+      </button>
+    </div>
+
+    <input
+      type="date"
+      value={date}
+      onChange={(e) => setDate(e.target.value)}
+      style={{
+        width: "100%",
+        padding: "10px 12px",
+        fontSize: 16,
+        borderRadius: 10,
+        border: "1px solid #ddd",
+        background: "#fff",
+      }}
+    />
+  </div>
+</div>
+{/* ===== ENDE DATUM ===== */}
+{/* Arbeitszeiten */}
+  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+    <label>
             Arbeitsbeginn
             <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
               <input
@@ -375,30 +434,31 @@ export default function NewWorkday() {
           </label>
 
           <label>
-            Arbeitsende
-            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-              <input
-                type="time"
-                value={arbeitsende}
-                onChange={(e) => setArbeitsende(e.target.value)}
-                style={{ width: "100%", padding: 12, fontSize: 16 }}
-              />
-              <button type="button" onClick={() => setArbeitsende(nowHHMM())} style={{ padding: 12 }}>
-                Jetzt
-              </button>
-            </div>
-          </label>
-        </div>
+      Arbeitsende
+      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+        <input
+          type="time"
+          value={arbeitsende}
+          onChange={(e) => setArbeitsende(e.target.value)}
+          style={{ width: "100%", padding: 12, fontSize: 16 }}
+        />
+        <button type="button" onClick={() => setArbeitsende(nowHHMM())} style={{ padding: 12 }}>
+          Jetzt
+        </button>
+      </div>
+    </label>
+  </div>
 
-        <label style={{ display: "block", marginTop: 12 }}>
-          Tages-Kommentar
-          <textarea
-            value={tagesKommentar}
-            onChange={(e) => setTagesKommentar(e.target.value)}
-            style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 80 }}
-          />
-        </label>
-      </section>
+  {/* Tages-Kommentar */}
+  <label style={{ display: "block", marginTop: 12 }}>
+    Tages-Kommentar
+    <textarea
+      value={tagesKommentar}
+      onChange={(e) => setTagesKommentar(e.target.value)}
+      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 80 }}
+    />
+  </label>
+</section>
 
       {/* Einsätze */}
       <section style={{ marginTop: 14 }}>
