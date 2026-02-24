@@ -109,7 +109,9 @@ export default function NewWorkday() {
 
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
-const searchParams = useSearchParams();
+const searchParams = typeof window !== "undefined"
+  ? new URLSearchParams(window.location.search)
+  : null;
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -119,7 +121,7 @@ const searchParams = useSearchParams();
       }
       setMeName(me.firstName);
       setUserId(me.id);
-const dateFromUrl = searchParams.get("date");
+const dateFromUrl = searchParams?.get("date");
 if (dateFromUrl) {
   setDate(dateFromUrl);
 
