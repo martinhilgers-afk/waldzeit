@@ -64,6 +64,8 @@ function toIntOrNull(v: string) {
 export default function NewWorkday() {
   const [userId, setUserId] = useState<string | null>(null);
   const [meName, setMeName] = useState<string>("");
+const [objectOptions, setObjectOptions] = useState<string[]>([]);
+const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
   const [date, setDate] = useState(todayISO());
   const [arbeitsbeginn, setArbeitsbeginn] = useState("");
