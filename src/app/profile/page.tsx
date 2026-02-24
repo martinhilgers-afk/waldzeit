@@ -11,11 +11,13 @@ export default function ProfilePage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Benutzer laden
+  // ✅ NEW
+  const [machineOptions, setMachineOptions] = useState<string[]>([]);
+  const [defaultMachine, setDefaultMachine] = useState<string>("");
+
   useEffect(() => {
     (async () => {
       const me = await getMe();
-
       if (!me) {
         location.href = "/";
         return;
@@ -23,36 +25,69 @@ export default function ProfilePage() {
 
       setEmail(me.email || "");
 
-      // aktuellen Vorname aus Metadata holen
+      // Vorname aus Metadata holen (wie bisher)
       const { data } = await supabase.auth.getUser();
       const meta: any = data.user?.user_metadata || {};
-
       setFirstName(meta.first_name || meta.vorname || "");
+
+      // ✅ Maschinen laden
+      const m = await supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true });
+      setMachineOptions(((m.data as any[]) ?? []).map((x) => x.name));
+
+      // ✅ Standard-Maschine aus user_settings laden
+      const { data: settings } = await supabase
+        .from("user_settings")
+        .select("default_machine")
+        .eq("user_id", me.id)
+        .maybeSingle();
+
+      setDefaultMachine(settings?.default_machine ?? "");
+
       setLoading(false);
     })();
   }, []);
 
-  // Vorname speichern
   async function save() {
     if (!firstName.trim()) {
-      setMsg("Bitte einen Vornamen eingeben.");
+      setMsg("Bitte einen Namen eingeben.");
       return;
     }
 
     setMsg("Speichern...");
 
-    const { error } = await supabase.auth.updateUser({
-      data: {
-        first_name: firstName.trim(),
-      },
+    // 1) Name speichern (wie bisher)
+    const { error: nameErr } = await supabase.auth.updateUser({
+      data: { first_name: firstName.trim() },
     });
 
-    if (error) {
-      setMsg("Fehler: " + error.message);
+    if (nameErr) {
+      setMsg("Fehler Name: " + nameErr.message);
       return;
     }
 
-    setMsg("✅ Vorname gespeichert!");
+    // 2) Standard-Maschine speichern (NEW)
+    const me = await getMe();
+    if (!me) {
+      setMsg("Fehler: nicht eingeloggt.");
+      return;
+    }
+
+    const { error: setErr } = await supabase
+      .from("user_settings")
+      .upsert(
+        {
+          user_id: me.id,
+          default_machine: defaultMachine.trim() ? defaultMachine.trim() : null,
+        },
+        { onConflict: "user_id" }
+      );
+
+    if (setErr) {
+      setMsg("Fehler Standard-Maschine: " + setErr.message);
+      return;
+    }
+
+    setMsg("✅ Profil gespeichert!");
   }
 
   if (loading) {
@@ -65,26 +100,11 @@ export default function ProfilePage() {
 
   return (
     <main style={{ maxWidth: 520, margin: "24px auto", padding: 12 }}>
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 12,
-        }}
-      >
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
         <h1 style={{ margin: 0 }}>Profil</h1>
 
         <Link href="/app">
-          <button
-            style={{
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid #ddd",
-            }}
-          >
-            Zur Übersicht
-          </button>
+          <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Zur Übersicht</button>
         </Link>
       </header>
 
@@ -106,8 +126,8 @@ export default function ProfilePage() {
           />
         </label>
 
-        <label style={{ display: "block" }}>
-          Vorname
+        <label style={{ display: "block", marginBottom: 12 }}>
+          Name
           <input
             value={firstName}
             onChange={(e) => setFirstName(e.target.value)}
@@ -121,6 +141,31 @@ export default function ProfilePage() {
               borderRadius: 8,
             }}
           />
+        </label>
+
+        {/* ✅ NEW: Standard-Maschine */}
+        <label style={{ display: "block" }}>
+          Standard-Maschine
+          <select
+            value={defaultMachine}
+            onChange={(e) => setDefaultMachine(e.target.value)}
+            style={{
+              width: "100%",
+              padding: 12,
+              fontSize: 16,
+              marginTop: 6,
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              background: "#fff",
+            }}
+          >
+            <option value="">(keine)</option>
+            {machineOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
         </label>
 
         <button
@@ -138,11 +183,7 @@ export default function ProfilePage() {
           Speichern
         </button>
 
-        {msg && (
-          <p style={{ marginTop: 12, whiteSpace: "pre-wrap" }}>
-            {msg}
-          </p>
-        )}
+        {msg && <p style={{ marginTop: 12, whiteSpace: "pre-wrap" }}>{msg}</p>}
       </div>
     </main>
   );

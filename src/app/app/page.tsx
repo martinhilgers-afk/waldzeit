@@ -8,6 +8,8 @@ import { getMe } from "@/lib/me";
 type DayRow = {
   id: string;
   date: string; // YYYY-MM-DD
+  is_urlaub?: boolean | null;
+  is_wetter?: boolean | null;
 };
 
 type ItemRow = {
@@ -19,18 +21,28 @@ type DayUI = {
   id: string;
   date: string;
   objekte: string[]; // unique
+  isUrlaub: boolean;
+  isWetter: boolean;
 };
 
+// ✅ Robust: ISO-Week in UTC (verhindert „Gruppierung kaputt“ durch Zeitzone)
 function isoWeekKey(dateISO: string) {
-  // ISO week: returns "2026-KW09"
-  const d = new Date(dateISO + "T12:00:00");
-  const dayNum = (d.getDay() + 6) % 7; // Mon=0..Sun=6
-  d.setDate(d.getDate() - dayNum + 3); // Thursday
-  const firstThursday = new Date(d.getFullYear(), 0, 4);
-  const firstDayNum = (firstThursday.getDay() + 6) % 7;
-  firstThursday.setDate(firstThursday.getDate() - firstDayNum + 3);
-  const week = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
-  return `${d.getFullYear()}-KW${String(week).padStart(2, "0")}`;
+  const [y, m, d] = dateISO.split("-").map((x) => Number(x));
+  const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+
+  const day = date.getUTCDay() || 7; // Mon=1..Sun=7
+  date.setUTCDate(date.getUTCDate() + 4 - day); // Thursday
+
+  const isoYear = date.getUTCFullYear();
+
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1, 12, 0, 0));
+  const yearStartDay = yearStart.getUTCDay() || 7;
+  const firstThursday = new Date(yearStart);
+  firstThursday.setUTCDate(firstThursday.getUTCDate() + (4 - yearStartDay));
+
+  const week = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+
+  return `${isoYear}-KW${String(week).padStart(2, "0")}`;
 }
 
 function fmtDE(dateISO: string) {
@@ -48,10 +60,9 @@ export default function Overview() {
   async function load() {
     setMsg("Lade...");
 
-    // 1) Workdays
     const { data: dayData, error: dayErr } = await supabase
       .from("workdays")
-      .select("id,date")
+      .select("id,date,is_urlaub,is_wetter")
       .order("date", { ascending: false })
       .limit(80);
 
@@ -64,13 +75,9 @@ export default function Overview() {
     const rawDays = ((dayData as any[]) ?? []) as DayRow[];
     const ids = rawDays.map((d) => d.id);
 
-    // 2) Objekte der Einsätze für diese Tage
     let itemData: ItemRow[] = [];
     if (ids.length > 0) {
-      const { data: items, error: itemErr } = await supabase
-        .from("work_items")
-        .select("workday_id,objekt")
-        .in("workday_id", ids);
+      const { data: items, error: itemErr } = await supabase.from("work_items").select("workday_id,objekt").in("workday_id", ids);
 
       if (itemErr) {
         setMsg("Fehler: " + itemErr.message);
@@ -94,7 +101,13 @@ export default function Overview() {
     const ui: DayUI[] = rawDays.map((d) => {
       const objs = map.get(d.id) ?? [];
       const uniq = Array.from(new Set(objs)).sort((a, b) => a.localeCompare(b));
-      return { id: d.id, date: d.date, objekte: uniq };
+      return {
+        id: d.id,
+        date: d.date,
+        objekte: uniq,
+        isUrlaub: !!d.is_urlaub,
+        isWetter: !!d.is_wetter,
+      };
     });
 
     setDays(ui);
@@ -102,10 +115,8 @@ export default function Overview() {
   }
 
   async function loadIsAdmin() {
-    // wichtig: das muss mit eingeloggtem User laufen
     const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
     if (error) {
-      // wenn RLS blockiert -> dann bist du nicht admin (oder policy falsch)
       setIsAdmin(false);
       return;
     }
@@ -120,7 +131,6 @@ export default function Overview() {
         return;
       }
       setMeName(me.firstName);
-
       await Promise.all([loadIsAdmin(), load()]);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -139,10 +149,40 @@ export default function Overview() {
       arr.push(d);
       g.set(key, arr);
     }
-    // sort keys desc
     const keys = Array.from(g.keys()).sort((a, b) => (a < b ? 1 : -1));
     return keys.map((k) => ({ key: k, days: g.get(k)! }));
   }, [days]);
+
+  function dayRowClass(d: DayUI) {
+    if (d.isUrlaub) return "rowCard rowCardUrlaub";
+    if (d.isWetter) return "rowCard rowCardWetter";
+    return "rowCard";
+  }
+
+  async function deleteDay(dayId: string, dateISO: string) {
+    const ok = confirm(`Diesen Tag wirklich löschen?\n${fmtDE(dateISO)}\n\nAchtung: Alle Einsätze werden mit gelöscht.`);
+    if (!ok) return;
+
+    setMsg("Lösche...");
+
+    // 1) erst Items löschen
+    const { error: delItemsErr } = await supabase.from("work_items").delete().eq("workday_id", dayId);
+    if (delItemsErr) {
+      setMsg("Fehler beim Löschen der Einsätze: " + delItemsErr.message);
+      return;
+    }
+
+    // 2) dann Workday löschen
+    const { error: delDayErr } = await supabase.from("workdays").delete().eq("id", dayId);
+    if (delDayErr) {
+      setMsg("Fehler beim Löschen des Tages: " + delDayErr.message);
+      return;
+    }
+
+    setMsg("✅ Gelöscht!");
+    await load();
+    setTimeout(() => setMsg(""), 600);
+  }
 
   return (
     <main className="wrap">
@@ -182,27 +222,60 @@ export default function Overview() {
       {msg && <p className="msg">{msg}</p>}
 
       <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
-        {grouped.map((w) => (
-          <section key={w.key} className="card">
-            <h2 className="h2">{w.key}</h2>
+        {grouped.map((w, idx) => (
+          <details key={w.key} className="weekCard" open={idx === 0}>
+            <summary className="weekSum">
+              <span className="chev">▸</span>
+              <span className="weekTitle">{w.key}</span>
+              <span className="weekCount">{w.days.length} Tage</span>
+            </summary>
 
-            <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
               {w.days.map((d) => (
-                <Link key={d.id} href={`/app/day/${d.id}`} style={{ textDecoration: "none", color: "inherit" }}>
-                  <div className="rowCard">
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                      <b>{fmtDE(d.date)}</b>
-                      {/* Uhrzeiten absichtlich weg */}
-                    </div>
+                <div key={d.id} className="dayRowWrap">
+                  <Link href={`/app/day/${d.id}`} style={{ textDecoration: "none", color: "inherit", flex: 1 }}>
+                    <div className={dayRowClass(d)}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <b>{fmtDE(d.date)}</b>
+                      </div>
 
-                    <div style={{ marginTop: 6, opacity: 0.85 }}>
-                      {d.objekte.length > 0 ? d.objekte.join(", ") : <span style={{ opacity: 0.6 }}>(keine Einsätze)</span>}
+                      <div style={{ marginTop: 6, opacity: 0.9 }}>
+                        {d.isUrlaub ? (
+                          <span style={{ fontWeight: 900 }}>🌴 Urlaub</span>
+                        ) : d.isWetter ? (
+                          <span style={{ fontWeight: 900 }}>🌧️ Wetter</span>
+                        ) : d.objekte.length > 0 ? (
+                          d.objekte.join(", ")
+                        ) : (
+                          <span style={{ opacity: 0.65 }}>(keine Einsätze)</span>
+                        )}
+                      </div>
                     </div>
+                  </Link>
+
+                  {/* ✅ Icons rechts */}
+                  <div className="dayActions">
+                    <Link href={`/app/day/${d.id}`} title="Bearbeiten" className="iconBtn">
+                      ✏️
+                    </Link>
+
+                    <button
+                      type="button"
+                      title="Löschen"
+                      className="iconBtn"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteDay(d.id, d.date);
+                      }}
+                    >
+                      🗑️
+                    </button>
                   </div>
-                </Link>
+                </div>
               ))}
             </div>
-          </section>
+          </details>
         ))}
       </div>
 
@@ -215,16 +288,60 @@ const baseStyles = `
 .wrap{max-width:900px;margin:24px auto;padding:12px}
 .head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
 .h1{margin:0;font-size:36px;line-height:1.1}
-.h2{margin:0 0 10px 0;font-size:22px}
 .sub{opacity:.82;margin-top:6px}
 .link{margin-left:10px;text-decoration:underline}
-.card{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
-.rowCard{border:1px solid #eee;border-radius:14px;padding:12px}
+
 .btn{padding:10px 12px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:800}
 .btnPrimary{padding:12px 14px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:900}
 .msg{white-space:pre-wrap}
+
+/* Woche */
+.weekCard{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
+.weekSum{
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-weight:900;
+  user-select:none;
+  list-style:none;
+}
+.weekSum::-webkit-details-marker{display:none}
+.chev{display:inline-block;transform:rotate(0deg);transition:transform .12s ease}
+details[open] .chev{transform:rotate(90deg)}
+.weekTitle{font-size:22px}
+.weekCount{margin-left:auto;opacity:.65;font-weight:800}
+
+/* Tag-Layout + Actions rechts */
+.dayRowWrap{display:flex;gap:10px;align-items:stretch}
+.dayActions{display:flex;gap:8px;align-items:stretch}
+.iconBtn{
+  width:44px;
+  min-width:44px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid #eee;
+  border-radius:12px;
+  background:#fff;
+  font-weight:900;
+  cursor:pointer;
+  text-decoration:none;
+  color:inherit;
+}
+.iconBtn:hover{border-color:#ddd}
+
+/* Rows */
+.rowCard{border:1px solid #eee;border-radius:14px;padding:12px;background:#fff}
+.rowCardUrlaub{background:#ecfdf3;border-color:#c7f2d5}
+.rowCardWetter{background:#eef6ff;border-color:#cfe4ff}
+
 @media (max-width:700px){
   .h1{font-size:30px}
   .head{flex-direction:column;align-items:stretch}
+  .weekTitle{font-size:18px}
+  .dayRowWrap{flex-direction:column}
+  .dayActions{justify-content:flex-end}
+  .iconBtn{width:100%;min-width:unset;height:44px}
 }
 `;

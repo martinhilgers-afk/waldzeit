@@ -13,9 +13,23 @@ export async function getMe() {
     (meta.full_name ? String(meta.full_name).split(" ")[0] : null) ||
     user.email;
 
+  // ✅ NEW: Standard-Maschine aus user_settings laden
+  const { data: settings, error: settingsErr } = await supabase
+    .from("user_settings")
+    .select("default_machine")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  // Wenn es noch keine Zeile gibt oder RLS greift: einfach leer lassen
+  const defaultMachine =
+    settingsErr ? "" : (settings?.default_machine ?? "");
+
   return {
     id: user.id,
     email: user.email,
     firstName: String(firstName || "Unbekannt"),
+
+    // ✅ NEW: überall verfügbar
+    default_machine: String(defaultMachine || ""),
   };
 }

@@ -195,10 +195,16 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
+        {/* ✅ Buttons rechts */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Link href="/admin/export">
+            <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Export</button>
+          </Link>
+
           <Link href="/app">
             <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Zur Übersicht</button>
           </Link>
+
           <button
             onClick={loadAll}
             disabled={busy}
@@ -263,8 +269,7 @@ export default function AdminPage() {
                 }}
               >
                 <div style={{ minWidth: 200 }}>
-                  <b>{o.name}</b>{" "}
-                  {!o.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                  <b>{o.name}</b> {!o.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
                 </div>
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -355,8 +360,7 @@ export default function AdminPage() {
                 }}
               >
                 <div style={{ minWidth: 200 }}>
-                  <b>{m.name}</b>{" "}
-                  {!m.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                  <b>{m.name}</b> {!m.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
                 </div>
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
