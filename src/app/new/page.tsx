@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
+import { useSearchParams } from "next/navigation";
 
 type WorkItem = {
   key: string; // nur UI
@@ -11,6 +12,15 @@ type WorkItem = {
   maschine: string;
 
   fahrtzeit_min: string;
+
+  // Maschinenstunden als Start/Ende
+  mas_start: string;
+  mas_end: string;
+
+  // NEU: zuletzt gespeichertes MAS Ende (für Warnung)
+  last_mas_end: number | null;
+
+  // Anzeige / Export (aus Beginn/Ende berechnet)
   maschinenstunden_h: string;
 
   unterhalt_h: string;
@@ -64,13 +74,15 @@ function toIntOrNull(v: string) {
 export default function NewWorkday() {
   const [userId, setUserId] = useState<string | null>(null);
   const [meName, setMeName] = useState<string>("");
-const [objectOptions, setObjectOptions] = useState<string[]>([]);
-const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
   const [date, setDate] = useState(todayISO());
   const [arbeitsbeginn, setArbeitsbeginn] = useState("");
   const [arbeitsende, setArbeitsende] = useState("");
   const [tagesKommentar, setTagesKommentar] = useState("");
+
+  // Dropdown-Optionen
+  const [objectOptions, setObjectOptions] = useState<string[]>([]);
+  const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
   const [items, setItems] = useState<WorkItem[]>(() => [
     {
@@ -78,6 +90,9 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
       objekt: "",
       maschine: "",
       fahrtzeit_min: "",
+      mas_start: "",
+      mas_end: "",
+      last_mas_end: null,
       maschinenstunden_h: "",
       unterhalt_h: "",
       reparatur_h: "",
@@ -94,7 +109,7 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
-
+const searchParams = useSearchParams();
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -104,6 +119,59 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
       }
       setMeName(me.firstName);
       setUserId(me.id);
+const dateFromUrl = searchParams.get("date");
+if (dateFromUrl) {
+  setDate(dateFromUrl);
+
+  // bestehenden Workday + Items laden
+  const { data: wd, error } = await supabase
+    .from("workdays")
+    .select("id,arbeitsbeginn,arbeitsende,kommentar,work_items(*)")
+    .eq("user_id", me.id)
+    .eq("date", dateFromUrl)
+    .limit(1);
+
+  if (!error && wd && wd.length > 0) {
+    const row: any = wd[0];
+    setArbeitsbeginn(row.arbeitsbeginn ?? "");
+    setArbeitsende(row.arbeitsende ?? "");
+    setTagesKommentar(row.kommentar ?? "");
+
+    const wi: any[] = row.work_items ?? [];
+    if (wi.length > 0) {
+      setItems(
+        wi.map((x) => ({
+          key: uid(),
+          objekt: x.objekt ?? "",
+          maschine: x.maschine ?? "",
+          fahrtzeit_min: x.fahrtzeit_min?.toString?.() ?? "",
+          mas_start: x.mas_start?.toString?.() ?? "",
+          mas_end: x.mas_end?.toString?.() ?? "",
+          last_mas_end: null,
+          maschinenstunden_h: x.maschinenstunden_h?.toString?.() ?? "",
+          unterhalt_h: x.unterhalt_h?.toString?.() ?? "",
+          reparatur_h: x.reparatur_h?.toString?.() ?? "",
+          motormanuel_h: x.motormanuel_h?.toString?.() ?? "",
+          umsetzen_h: x.umsetzen_h?.toString?.() ?? "",
+          sonstiges_h: x.sonstiges_h?.toString?.() ?? "",
+          sonstiges_beschreibung: x.sonstiges_beschreibung ?? "",
+          diesel_l: x.diesel_l?.toString?.() ?? "",
+          adblue_l: x.adblue_l?.toString?.() ?? "",
+          kommentar: x.kommentar ?? "",
+          warnung: "",
+        }))
+      );
+    }
+  }
+}
+      // Stammdaten laden (für Dropdowns)
+      const [o, m] = await Promise.all([
+        supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
+        supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true }),
+      ]);
+
+      setObjectOptions(((o.data as any[]) ?? []).map((x) => x.name));
+      setMachineOptions(((m.data as any[]) ?? []).map((x) => x.name));
     })();
   }, []);
 
@@ -119,6 +187,9 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
         objekt: "",
         maschine: "",
         fahrtzeit_min: "",
+        mas_start: "",
+        mas_end: "",
+        last_mas_end: null,
         maschinenstunden_h: "",
         unterhalt_h: "",
         reparatur_h: "",
@@ -142,9 +213,8 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
   async function suggestFahrtzeit(objektValue: string, itemKey: string) {
     if (!userId) return;
     const obj = objektValue.trim();
-    if (obj.length < 3) return;
+    if (obj.length < 2) return;
 
-    // 1) letzte Workdays des Users
     const { data: days, error: dayErr } = await supabase
       .from("workdays")
       .select("id,date")
@@ -156,7 +226,6 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
     const ids = (days as any[]).map((d) => d.id);
 
-    // 2) letzter Einsatz mit diesem Objekt (nur fahrtzeit_min)
     const { data: last, error: itemErr } = await supabase
       .from("work_items")
       .select("fahrtzeit_min, created_at")
@@ -170,7 +239,6 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
 
     const v = (last as any[])[0]?.fahrtzeit_min;
     if (typeof v === "number") {
-      // nur setzen, wenn der Nutzer noch nichts eingetragen hat
       setItems((prev) =>
         prev.map((it) => {
           if (it.key !== itemKey) return it;
@@ -181,13 +249,82 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
     }
   }
 
-  // ✅ Maschinenstunden Check benutzerübergreifend (Warnung/Block)
-  async function checkMachine(itemKey: string, maschine: string, maschinenstunden_h: string) {
-    const m = maschine.trim();
-    const add = toNumOrNull(maschinenstunden_h);
-    if (!m || add === null || !date) {
+  // ✅ MAS Beginn Vorschlag + last_mas_end merken (benutzerübergreifend)
+  async function suggestMasStart(maschineValue: string, itemKey: string) {
+    const m = maschineValue.trim();
+    if (!m) return;
+
+    const { data, error } = await supabase
+      .from("work_items")
+      .select("mas_end, created_at")
+      .eq("maschine", m)
+      .not("mas_end", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error || !data || data.length === 0) {
+      updateItem(itemKey, { last_mas_end: null });
+      return;
+    }
+
+    const lastEnd = (data as any[])[0]?.mas_end;
+    if (typeof lastEnd !== "number") {
+      updateItem(itemKey, { last_mas_end: null });
+      return;
+    }
+
+    setItems((prev) =>
+      prev.map((it) => {
+        if (it.key !== itemKey) return it;
+
+        // lastEnd immer merken
+        if (!it.mas_start.trim()) {
+          // und vorschlagen
+          return { ...it, last_mas_end: lastEnd, mas_start: String(lastEnd) };
+        }
+        return { ...it, last_mas_end: lastEnd };
+      })
+    );
+  }
+
+  // ✅ Checks:
+  // - Ende < Beginn => ❌ Block
+  // - Delta > 24 => ❌ Block
+  // - Beginn < zuletzt gespeichertes Ende => ⚠️ Warnung
+  // - Tages-Summe pro Maschine >24 => ❌ Block, >16 => ⚠️ Hinweis
+  async function checkMachineHoursForDay(itemKey: string, itSnapshot: WorkItem) {
+    const m = itSnapshot.maschine.trim();
+    if (!m || !date) {
       updateItem(itemKey, { warnung: "" });
       return;
+    }
+
+    const s = toNumOrNull(itSnapshot.mas_start);
+    const e = toNumOrNull(itSnapshot.mas_end);
+
+    // Wenn noch nicht beide Zahlen da sind: keine Warnung
+    if (s === null || e === null) {
+      updateItem(itemKey, { warnung: "" });
+      return;
+    }
+
+    if (e < s) {
+      updateItem(itemKey, { warnung: "❌ Block: MAS Ende ist kleiner als MAS Beginn." });
+      return;
+    }
+
+    const delta = e - s;
+
+    if (delta > 24) {
+      updateItem(itemKey, { warnung: `❌ Block: Maschinenstunden für einen Einsatz sind ${delta.toFixed(2)}h (>24h).` });
+      return;
+    }
+
+    let localWarn = "";
+    if (typeof itSnapshot.last_mas_end === "number" && Number.isFinite(itSnapshot.last_mas_end)) {
+      if (s < itSnapshot.last_mas_end) {
+        localWarn = `⚠️ Hinweis: MAS Beginn (${s}) ist kleiner als zuletzt gespeichert (${itSnapshot.last_mas_end}). Stimmt die Maschine?`;
+      }
     }
 
     const { data, error } = await supabase.rpc("machine_hours_total", {
@@ -196,23 +333,24 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
     });
 
     if (error) {
-      updateItem(itemKey, { warnung: "" });
+      updateItem(itemKey, { warnung: localWarn });
       return;
     }
 
     const total = typeof data === "number" ? data : Number(data);
     if (!Number.isFinite(total)) {
-      updateItem(itemKey, { warnung: "" });
+      updateItem(itemKey, { warnung: localWarn });
       return;
     }
 
-    const sum = total + add;
+    const sum = total + delta;
+
     if (sum > 24) {
       updateItem(itemKey, { warnung: `❌ Block: Maschine wäre am ${date} insgesamt ca. ${sum.toFixed(2)}h (>24h)` });
     } else if (sum > 16) {
       updateItem(itemKey, { warnung: `⚠️ Hinweis: Maschine kommt am ${date} auf ca. ${sum.toFixed(2)}h` });
     } else {
-      updateItem(itemKey, { warnung: "" });
+      updateItem(itemKey, { warnung: localWarn });
     }
   }
 
@@ -235,8 +373,21 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
         errs.push(`Einsatz ${n}: Bei Sonstiges > 0 ist eine Beschreibung Pflicht.`);
       }
 
+      const s = toNumOrNull(it.mas_start);
+      const e = toNumOrNull(it.mas_end);
+      const anyMas = it.mas_start.trim() !== "" || it.mas_end.trim() !== "";
+      if (anyMas && (s === null || e === null)) {
+        errs.push(`Einsatz ${n}: MAS Beginn und MAS Ende bitte beide ausfüllen.`);
+      }
+      if (s !== null && e !== null && e < s) {
+        errs.push(`Einsatz ${n}: MAS Ende darf nicht kleiner als MAS Beginn sein.`);
+      }
+      if (s !== null && e !== null && e - s > 24) {
+        errs.push(`Einsatz ${n}: MAS Differenz > 24h ist nicht erlaubt.`);
+      }
+
       if (it.warnung.includes("❌ Block")) {
-        errs.push(`Einsatz ${n}: Maschinenstunden-Check blockiert (>24h).`);
+        errs.push(`Einsatz ${n}: Maschinenstunden-Check blockiert.`);
       }
     });
 
@@ -256,7 +407,6 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
     setSaving(true);
     setMsg("Speichern...");
 
-    // 1) Workday upsert (user_id + date unique)
     const { data: dayRows, error: dayErr } = await supabase
       .from("workdays")
       .upsert(
@@ -285,7 +435,6 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
       return;
     }
 
-    // 2) Idempotent: alte Einsätze des Tages löschen, dann neu schreiben
     const { error: delErr } = await supabase.from("work_items").delete().eq("workday_id", workdayId);
     if (delErr) {
       setSaving(false);
@@ -293,26 +442,35 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
       return;
     }
 
-    // 3) Neue Einsätze schreiben
-    const payload = items.map((it) => ({
-      workday_id: workdayId,
-      objekt: it.objekt.trim(),
-      maschine: it.maschine.trim(),
-      fahrtzeit_min: toIntOrNull(it.fahrtzeit_min),
-      maschinenstunden_h: toNumOrNull(it.maschinenstunden_h),
+    const payload = items.map((it) => {
+      const s = toNumOrNull(it.mas_start);
+      const e = toNumOrNull(it.mas_end);
+      const delta = s !== null && e !== null ? e - s : null;
 
-      unterhalt_h: toNumOrNull(it.unterhalt_h),
-      reparatur_h: toNumOrNull(it.reparatur_h),
-      motormanuel_h: toNumOrNull(it.motormanuel_h),
-      umsetzen_h: toNumOrNull(it.umsetzen_h),
-      sonstiges_h: toNumOrNull(it.sonstiges_h),
-      sonstiges_beschreibung: it.sonstiges_beschreibung.trim() || null,
+      return {
+        workday_id: workdayId,
+        objekt: it.objekt.trim(),
+        maschine: it.maschine.trim(),
+        fahrtzeit_min: toIntOrNull(it.fahrtzeit_min),
 
-      diesel_l: toNumOrNull(it.diesel_l),
-      adblue_l: toNumOrNull(it.adblue_l),
+        mas_start: s,
+        mas_end: e,
 
-      kommentar: it.kommentar.trim() || null,
-    }));
+        maschinenstunden_h: delta !== null && Number.isFinite(delta) ? delta : null,
+
+        unterhalt_h: toNumOrNull(it.unterhalt_h),
+        reparatur_h: toNumOrNull(it.reparatur_h),
+        motormanuel_h: toNumOrNull(it.motormanuel_h),
+        umsetzen_h: toNumOrNull(it.umsetzen_h),
+        sonstiges_h: toNumOrNull(it.sonstiges_h),
+        sonstiges_beschreibung: it.sonstiges_beschreibung.trim() || null,
+
+        diesel_l: toNumOrNull(it.diesel_l),
+        adblue_l: toNumOrNull(it.adblue_l),
+
+        kommentar: it.kommentar.trim() || null,
+      };
+    });
 
     const { error: insErr } = await supabase.from("work_items").insert(payload);
     setSaving(false);
@@ -346,89 +504,52 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
         </Link>
       </header>
 
-      {/* Tageskopf */}
       <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, marginTop: 12 }}>
         <h2 style={{ marginTop: 0 }}>Tag</h2>
 
-{/* ===== DATUM ===== */}
-<label style={{ display: "block", marginTop: 12 }}>
-  Datum
-</label>
+        <label style={{ display: "block", marginTop: 12 }}>Datum</label>
 
-<div
-  style={{
-    display: "flex",
-    justifyContent: "center",
-    marginTop: 6,
-  }}
->
-  <div style={{ width: "100%", maxWidth: 360 }}>
-    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-      <button
-        type="button"
-        onClick={() => setDate(todayISO())}
-        style={{
-          flex: 1,
-          padding: "10px 12px",
-          borderRadius: 12,
-          border: "1px solid #ddd",
-          fontWeight: 800,
-          background: "#fff",
-        }}
-      >
-        Heute
-      </button>
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 6 }}>
+          <div style={{ width: "100%", maxWidth: 360 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setDate(todayISO())}
+                style={{ flex: 1, padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", fontWeight: 800, background: "#fff" }}
+              >
+                Heute
+              </button>
 
-      <button
-        type="button"
-        onClick={() => {
-          const d = new Date();
-          d.setDate(d.getDate() - 1);
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, "0");
-          const day = String(d.getDate()).padStart(2, "0");
-          setDate(`${y}-${m}-${day}`);
-        }}
-        style={{
-          flex: 1,
-          padding: "10px 12px",
-          borderRadius: 12,
-          border: "1px solid #ddd",
-          fontWeight: 800,
-          background: "#fff",
-        }}
-      >
-        Gestern
-      </button>
-    </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() - 1);
+                  const y = d.getFullYear();
+                  const m = String(d.getMonth() + 1).padStart(2, "0");
+                  const day = String(d.getDate()).padStart(2, "0");
+                  setDate(`${y}-${m}-${day}`);
+                }}
+                style={{ flex: 1, padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", fontWeight: 800, background: "#fff" }}
+              >
+                Gestern
+              </button>
+            </div>
 
-    <input
-      type="date"
-      value={date}
-      onChange={(e) => setDate(e.target.value)}
-      style={{
-        width: "100%",
-        padding: "10px 12px",
-        fontSize: 16,
-        borderRadius: 10,
-        border: "1px solid #ddd",
-        background: "#fff",
-      }}
-    />
-  </div>
-</div>
-{/* ===== ENDE DATUM ===== */}
-{/* Arbeitszeiten */}
-  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-    <label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              style={{ width: "100%", padding: "10px 12px", fontSize: 16, borderRadius: 10, border: "1px solid #ddd", background: "#fff" }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+          <label>
             Arbeitsbeginn
             <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-              <input
-                type="time"
-                value={arbeitsbeginn}
-                onChange={(e) => setArbeitsbeginn(e.target.value)}
-                style={{ width: "100%", padding: 12, fontSize: 16 }}
-              />
+              <input type="time" value={arbeitsbeginn} onChange={(e) => setArbeitsbeginn(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16 }} />
               <button type="button" onClick={() => setArbeitsbeginn(nowHHMM())} style={{ padding: 12 }}>
                 Jetzt
               </button>
@@ -436,45 +557,26 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
           </label>
 
           <label>
-      Arbeitsende
-      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-        <input
-          type="time"
-          value={arbeitsende}
-          onChange={(e) => setArbeitsende(e.target.value)}
-          style={{ width: "100%", padding: 12, fontSize: 16 }}
-        />
-        <button type="button" onClick={() => setArbeitsende(nowHHMM())} style={{ padding: 12 }}>
-          Jetzt
-        </button>
-      </div>
-    </label>
-  </div>
+            Arbeitsende
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <input type="time" value={arbeitsende} onChange={(e) => setArbeitsende(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16 }} />
+              <button type="button" onClick={() => setArbeitsende(nowHHMM())} style={{ padding: 12 }}>
+                Jetzt
+              </button>
+            </div>
+          </label>
+        </div>
 
-  {/* Tages-Kommentar */}
-  <label style={{ display: "block", marginTop: 12 }}>
-    Tages-Kommentar
-    <textarea
-      value={tagesKommentar}
-      onChange={(e) => setTagesKommentar(e.target.value)}
-      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 80 }}
-    />
-  </label>
-</section>
+        <label style={{ display: "block", marginTop: 12 }}>
+          Tages-Kommentar
+          <textarea value={tagesKommentar} onChange={(e) => setTagesKommentar(e.target.value)} style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 80 }} />
+        </label>
+      </section>
 
-      {/* Einsätze */}
       <section style={{ marginTop: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <h2 style={{ margin: 0 }}>Einsätze</h2>
-          <button
-            onClick={addItem}
-            style={{
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #ddd",
-              fontWeight: 800,
-            }}
-          >
+          <button onClick={addItem} style={{ padding: 12, borderRadius: 12, border: "1px solid #ddd", fontWeight: 800 }}>
             + Einsatz hinzufügen
           </button>
         </div>
@@ -489,28 +591,52 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
               <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
                 <label>
                   Objekt *
-                  <input
+                  <select
                     value={it.objekt}
                     onChange={(e) => {
                       const v = e.target.value;
                       updateItem(it.key, { objekt: v });
-                      if (v.trim().length >= 3) suggestFahrtzeit(v, it.key);
+                      if (v.trim().length >= 2) suggestFahrtzeit(v, it.key);
                     }}
                     style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                  />
+                  >
+                    <option value="">Bitte wählen…</option>
+                    {objectOptions.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
 
                 <label>
                   Maschine *
-                  <input
+                  <select
                     value={it.maschine}
                     onChange={(e) => {
                       const v = e.target.value;
-                      updateItem(it.key, { maschine: v });
-                      checkMachine(it.key, v, it.maschinenstunden_h);
+
+                      // maschine setzen + warnung reset
+                      updateItem(it.key, { maschine: v, warnung: "" });
+
+                      if (v) {
+                        // lastEnd merken + ggf. mas_start vorschlagen
+                        suggestMasStart(v, it.key);
+                      }
+
+                      // Check mit Snapshot
+                      const snap = { ...it, maschine: v };
+                      checkMachineHoursForDay(it.key, snap);
                     }}
                     style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                  />
+                  >
+                    <option value="">Bitte wählen…</option>
+                    {machineOptions.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -525,15 +651,69 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
                   </label>
 
                   <label>
-                    Maschinenstunden (h)
+                    MAS Stunden (h) automatisch
                     <input
                       value={it.maschinenstunden_h}
+                      readOnly
+                      placeholder="(aus MAS Beginn/Ende)"
+                      style={{
+                        width: "100%",
+                        padding: 12,
+                        fontSize: 16,
+                        marginTop: 6,
+                        background: "#f7f7f7",
+                        border: "1px solid #ddd",
+                        borderRadius: 8,
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <label>
+                    MAS Beginn
+                    <input
+                      value={it.mas_start}
                       onChange={(e) => {
                         const v = e.target.value;
-                        updateItem(it.key, { maschinenstunden_h: v });
-                        checkMachine(it.key, it.maschine, v);
+                        const s = toNumOrNull(v);
+                        const eNum = toNumOrNull(it.mas_end);
+                        const delta = s !== null && eNum !== null ? eNum - s : null;
+
+                        updateItem(it.key, {
+                          mas_start: v,
+                          maschinenstunden_h: delta === null ? "" : String(delta),
+                        });
+
+                        const snap = { ...it, mas_start: v, maschinenstunden_h: delta === null ? "" : String(delta) };
+                        checkMachineHoursForDay(it.key, snap);
                       }}
                       inputMode="decimal"
+                      placeholder="z.B. 2450.5"
+                      style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
+                    />
+                  </label>
+
+                  <label>
+                    MAS Ende
+                    <input
+                      value={it.mas_end}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        const s = toNumOrNull(it.mas_start);
+                        const eNum = toNumOrNull(v);
+                        const delta = s !== null && eNum !== null ? eNum - s : null;
+
+                        updateItem(it.key, {
+                          mas_end: v,
+                          maschinenstunden_h: delta === null ? "" : String(delta),
+                        });
+
+                        const snap = { ...it, mas_end: v, maschinenstunden_h: delta === null ? "" : String(delta) };
+                        checkMachineHoursForDay(it.key, snap);
+                      }}
+                      inputMode="decimal"
+                      placeholder="z.B. 2456.0"
                       style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
                     />
                   </label>
@@ -552,107 +732,59 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <label>
                         Unterhalt (h)
-                        <input
-                          value={it.unterhalt_h}
-                          onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.unterhalt_h} onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
 
                       <label>
                         Reparatur (h)
-                        <input
-                          value={it.reparatur_h}
-                          onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.reparatur_h} onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
                     </div>
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <label>
                         Motormanuel (h)
-                        <input
-                          value={it.motormanuel_h}
-                          onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.motormanuel_h} onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
 
                       <label>
                         Umsetzen (h)
-                        <input
-                          value={it.umsetzen_h}
-                          onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.umsetzen_h} onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
                     </div>
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <label>
                         Sonstiges (h)
-                        <input
-                          value={it.sonstiges_h}
-                          onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.sonstiges_h} onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
 
                       <label>
                         Sonstiges Beschreibung
-                        <input
-                          value={it.sonstiges_beschreibung}
-                          onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })}
-                          placeholder="z.B. Kette wechseln"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.sonstiges_beschreibung} onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })} placeholder="z.B. Kette wechseln" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
                     </div>
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <label>
                         Diesel (L)
-                        <input
-                          value={it.diesel_l}
-                          onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.diesel_l} onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
 
                       <label>
                         AdBlue (L)
-                        <input
-                          value={it.adblue_l}
-                          onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })}
-                          inputMode="decimal"
-                          style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }}
-                        />
+                        <input value={it.adblue_l} onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })} inputMode="decimal" style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6 }} />
                       </label>
                     </div>
 
                     <label>
                       Einsatz Kommentar
-                      <textarea
-                        value={it.kommentar}
-                        onChange={(e) => updateItem(it.key, { kommentar: e.target.value })}
-                        style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 70 }}
-                      />
+                      <textarea value={it.kommentar} onChange={(e) => updateItem(it.key, { kommentar: e.target.value })} style={{ width: "100%", padding: 12, fontSize: 16, marginTop: 6, minHeight: 70 }} />
                     </label>
                   </div>
                 </details>
 
-                <button
-                  type="button"
-                  onClick={() => removeItem(it.key)}
-                  style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", width: "fit-content" }}
-                >
+                <button type="button" onClick={() => removeItem(it.key)} style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", width: "fit-content" }}>
                   Einsatz löschen
                 </button>
               </div>
@@ -662,11 +794,7 @@ const [machineOptions, setMachineOptions] = useState<string[]>([]);
       </section>
 
       <div style={{ marginTop: 14 }}>
-        <button
-          onClick={save}
-          disabled={saving}
-          style={{ padding: 14, fontSize: 16, fontWeight: 900, borderRadius: 12, border: "1px solid #ddd" }}
-        >
+        <button onClick={save} disabled={saving} style={{ padding: 14, fontSize: 16, fontWeight: 900, borderRadius: 12, border: "1px solid #ddd" }}>
           {saving ? "Speichern..." : "Speichern"}
         </button>
 
