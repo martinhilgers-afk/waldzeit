@@ -17,6 +17,7 @@ export default function Overview() {
   const [days, setDays] = useState<Day[]>([]);
   const [msg, setMsg] = useState("");
   const [meName, setMeName] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState(false);
 
   async function load() {
     setMsg("Lade...");
@@ -43,6 +44,11 @@ export default function Overview() {
         return;
       }
       setMeName(me.firstName);
+
+      // ✅ Admin-Check (RPC muss existieren: public.is_admin())
+      const { data: adminData } = await supabase.rpc("is_admin");
+      setIsAdmin(adminData === true);
+
       await load();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -70,6 +76,13 @@ export default function Overview() {
             <Link href="/profile" style={{ marginLeft: 10 }}>
               Profil
             </Link>
+
+            {/* ✅ Admin-Link nur anzeigen, wenn Admin */}
+            {isAdmin && (
+              <Link href="/admin" style={{ marginLeft: 10 }}>
+                Admin
+              </Link>
+            )}
           </div>
         </div>
 
