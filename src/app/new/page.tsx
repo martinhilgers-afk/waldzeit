@@ -71,11 +71,16 @@ function toIntOrNull(v: string) {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
+function isMotorsaege(maschine: string) {
+  const m = (maschine || "").trim().toLowerCase();
+  return m === "motorsäge" || m === "motorsaege";
+}
+
 export default function NewWorkday() {
   const [userId, setUserId] = useState<string | null>(null);
   const [meName, setMeName] = useState<string>("");
 
-  // ✅ NEW: Standard-Maschine aus Profil
+  // ✅ Standard-Maschine aus Profil
   const [defaultMachine, setDefaultMachine] = useState<string>("");
 
   const [date, setDate] = useState(todayISO());
@@ -83,7 +88,7 @@ export default function NewWorkday() {
   const [arbeitsende, setArbeitsende] = useState("");
   const [tagesKommentar, setTagesKommentar] = useState("");
 
-  // ✅ NEW: Tag-Flags
+  // ✅ Tag-Flags
   const [isUrlaub, setIsUrlaub] = useState(false);
   const [isWetter, setIsWetter] = useState(false);
 
@@ -97,7 +102,7 @@ export default function NewWorkday() {
     {
       key: uid(),
       objekt: "",
-      maschine: "", // ✅ wird nach Laden des Profils automatisch gesetzt (nur wenn leer)
+      maschine: "", // wird nach Laden des Profils automatisch gesetzt (nur wenn leer)
       fahrtzeit_min: "",
       mas_start: "",
       mas_end: "",
@@ -131,7 +136,7 @@ export default function NewWorkday() {
       setMeName(me.firstName);
       setUserId(me.id);
 
-      // ✅ NEW: Standard-Maschine merken
+      // ✅ Standard-Maschine merken
       setDefaultMachine(String((me as any).default_machine || ""));
 
       const [o, m] = await Promise.all([
@@ -144,15 +149,72 @@ export default function NewWorkday() {
     })();
   }, []);
 
-  // ✅ NEW: ersten Einsatz automatisch vorbelegen (nur wenn leer -> manuell bleibt möglich)
+  // ✅ Letztes Objekt pro Benutzer automatisch vorbelegen (DB + localStorage)
+  useEffect(() => {
+    if (!userId) return;
+
+    const lsKey = `waldzeit:last_objekt:${userId}`;
+
+    // 1) Sofort: localStorage (schnell)
+    const cached = typeof window !== "undefined" ? localStorage.getItem(lsKey) : null;
+    if (cached && cached.trim()) {
+      setItems((prev) =>
+        prev.map((it, idx) => {
+          if (idx !== 0) return it; // nur erster Einsatz
+          if (it.objekt.trim()) return it; // nicht überschreiben
+          return { ...it, objekt: cached };
+        })
+      );
+    }
+
+    // 2) Dann: DB (autoritative)
+    (async () => {
+      const { data: days, error: dayErr } = await supabase
+        .from("workdays")
+        .select("id,date")
+        .eq("user_id", userId)
+        .order("date", { ascending: false })
+        .limit(60);
+
+      if (dayErr || !days || days.length === 0) return;
+      const ids = (days as any[]).map((d) => d.id);
+
+      const { data: last, error: itemErr } = await supabase
+        .from("work_items")
+        .select("objekt, created_at")
+        .in("workday_id", ids)
+        .not("objekt", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (itemErr || !last || last.length === 0) return;
+
+      const lastObj = String((last as any[])[0]?.objekt || "").trim();
+      if (!lastObj) return;
+
+      try {
+        localStorage.setItem(lsKey, lastObj);
+      } catch {}
+
+      setItems((prev) =>
+        prev.map((it, idx) => {
+          if (idx !== 0) return it;
+          if (it.objekt.trim()) return it;
+          return { ...it, objekt: lastObj };
+        })
+      );
+    })();
+  }, [userId]);
+
+  // ✅ ersten Einsatz automatisch Maschine vorbelegen (nur wenn leer)
   useEffect(() => {
     const dm = defaultMachine.trim();
     if (!dm) return;
 
     setItems((prev) =>
       prev.map((it, idx) => {
-        if (idx !== 0) return it; // nur erster Einsatz
-        if (it.maschine.trim()) return it; // nichts überschreiben
+        if (idx !== 0) return it;
+        if (it.maschine.trim()) return it;
         return { ...it, maschine: dm };
       })
     );
@@ -176,7 +238,7 @@ export default function NewWorkday() {
       {
         key: uid(),
         objekt: "",
-        maschine: defaultMachine.trim() || "", // ✅ NEW: neue Einsätze standardmäßig mit Default-Maschine
+        maschine: defaultMachine.trim() || "",
         fahrtzeit_min: "",
         mas_start: "",
         mas_end: "",
@@ -244,6 +306,12 @@ export default function NewWorkday() {
     const m = maschineValue.trim();
     if (!m) return;
 
+    // Motorsäge: keine MAS-Vorschläge
+    if (isMotorsaege(m)) {
+      updateItem(itemKey, { last_mas_end: null });
+      return;
+    }
+
     const { data, error } = await supabase
       .from("work_items")
       .select("mas_end, created_at")
@@ -284,6 +352,11 @@ export default function NewWorkday() {
 
   async function checkMachineHoursForDay(itemKey: string, it: WorkItem) {
     if (isSpecialDay) {
+      updateItem(itemKey, { warnung: "" });
+      return;
+    }
+
+    if (isMotorsaege(it.maschine)) {
       updateItem(itemKey, { warnung: "" });
       return;
     }
@@ -359,14 +432,13 @@ export default function NewWorkday() {
 
     if (!date) errs.push("Datum fehlt.");
 
-    // ✅ Urlaub/Wetter: keine Arbeitszeiten nötig/erlaubt
+    // Urlaub/Wetter: keine Arbeitszeiten nötig/erlaubt
     if (!isSpecialDay) {
       if ((arbeitsbeginn && !arbeitsende) || (!arbeitsbeginn && arbeitsende)) {
         errs.push("Arbeitsbeginn und Arbeitsende bitte beide setzen (oder beide leer lassen).");
       }
     }
 
-    // ✅ Urlaub/Wetter: Einsätze NICHT Pflicht
     if (!isSpecialDay) {
       items.forEach((it, idx) => {
         const n = idx + 1;
@@ -378,24 +450,27 @@ export default function NewWorkday() {
           errs.push(`Einsatz ${n}: Bei Sonstiges > 0 ist eine Beschreibung Pflicht.`);
         }
 
-        const s = toNumOrNull(it.mas_start);
-        const e = toNumOrNull(it.mas_end);
-        const anyMas = it.mas_start.trim() !== "" || it.mas_end.trim() !== "";
-        if (anyMas && (s === null || e === null)) {
-          errs.push(`Einsatz ${n}: MAS Beginn und MAS Ende bitte beide ausfüllen.`);
-        }
-        if (s !== null && e !== null && e < s) {
-          errs.push(`Einsatz ${n}: MAS Ende darf nicht kleiner als MAS Beginn sein.`);
+        // ✅ MAS nur wenn NICHT Motorsäge
+        if (!isMotorsaege(it.maschine)) {
+          const s = toNumOrNull(it.mas_start);
+          const e = toNumOrNull(it.mas_end);
+          const anyMas = it.mas_start.trim() !== "" || it.mas_end.trim() !== "";
+          if (anyMas && (s === null || e === null)) {
+            errs.push(`Einsatz ${n}: MAS Beginn und MAS Ende bitte beide ausfüllen.`);
+          }
+          if (s !== null && e !== null && e < s) {
+            errs.push(`Einsatz ${n}: MAS Ende darf nicht kleiner als MAS Beginn sein.`);
+          }
+
+          if (it.warnung.includes("❌ Block")) {
+            errs.push(`Einsatz ${n}: Maschinenstunden-Check blockiert.`);
+          }
         }
 
         // Twinch: wenn genutzt und Stunden gesetzt -> muss Zahl sein
         if (it.twinch_used) {
           const th = toNumOrNull(it.twinch_h);
           if (it.twinch_h.trim() !== "" && th === null) errs.push(`Einsatz ${n}: Twinch Stunden sind keine Zahl.`);
-        }
-
-        if (it.warnung.includes("❌ Block")) {
-          errs.push(`Einsatz ${n}: Maschinenstunden-Check blockiert.`);
         }
       });
     }
@@ -454,7 +529,7 @@ export default function NewWorkday() {
       return;
     }
 
-    // ✅ Urlaub/Wetter: keine Items speichern
+    // Urlaub/Wetter: keine Items speichern
     if (isSpecialDay) {
       setSaving(false);
       setMsg("✅ Gespeichert!");
@@ -465,8 +540,10 @@ export default function NewWorkday() {
     }
 
     const payload = items.map((it) => {
-      const s = toNumOrNull(it.mas_start);
-      const e = toNumOrNull(it.mas_end);
+      const chainsaw = isMotorsaege(it.maschine);
+
+      const s = chainsaw ? null : toNumOrNull(it.mas_start);
+      const e = chainsaw ? null : toNumOrNull(it.mas_end);
       const delta = s !== null && e !== null ? e - s : null;
 
       return {
@@ -491,7 +568,6 @@ export default function NewWorkday() {
 
         kommentar: it.kommentar.trim() || null,
 
-        // ✅ NEW: Twinch
         twinch_used: !!it.twinch_used,
         twinch_h: it.twinch_used ? toNumOrNull(it.twinch_h) : null,
       };
@@ -560,7 +636,7 @@ export default function NewWorkday() {
           </div>
         </div>
 
-        {/* ✅ NEW: Urlaub/Wetter */}
+        {/* Urlaub/Wetter */}
         <div className="row2" style={{ marginTop: 12 }}>
           <label className="chk">
             <input
@@ -609,7 +685,13 @@ export default function NewWorkday() {
           <label className="field">
             Arbeitsende
             <div className="rowBtn">
-              <input type="time" value={arbeitsende} disabled={isSpecialDay} onChange={(e) => setArbeitsende(e.target.value)} className="control" />
+              <input
+                type="time"
+                value={arbeitsende}
+                disabled={isSpecialDay}
+                onChange={(e) => setArbeitsende(e.target.value)}
+                className="control"
+              />
               <button type="button" disabled={isSpecialDay} onClick={() => setArbeitsende(nowHHMM())} className="btnSm">
                 Jetzt
               </button>
@@ -627,7 +709,7 @@ export default function NewWorkday() {
         )}
       </section>
 
-      {/* ✅ Einsätze ausgrauen/optional ausblenden */}
+      {/* Einsätze */}
       {!isSpecialDay && (
         <section style={{ marginTop: 14 }}>
           <div className="head2">
@@ -640,217 +722,270 @@ export default function NewWorkday() {
           </div>
 
           <div className="grid">
-            {items.map((it, idx) => (
-              <details key={it.key} open={idx === 0} className="card">
-                <summary className="sum">
-                  Einsatz {idx + 1}: {it.objekt || "Objekt"} / {it.maschine || "Maschine"}
-                </summary>
+            {items.map((it, idx) => {
+              const chainsaw = isMotorsaege(it.maschine);
 
-                <div className="inner">
-                  <label className="field">
-                    Objekt *
-                    <select
-                      value={it.objekt}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        updateItem(it.key, { objekt: v });
-                        if (v.trim().length >= 2) suggestFahrtzeit(v, it.key);
-                      }}
-                      className="control"
-                    >
-                      <option value="">Bitte wählen…</option>
-                      {objectOptions.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+              return (
+                <details key={it.key} open={idx === 0} className="card">
+                  <summary className="sum">
+                    Einsatz {idx + 1}: {it.objekt || "Objekt"} / {it.maschine || "Maschine"}
+                  </summary>
 
-                  <label className="field">
-                    Maschine *
-                    <select
-                      value={it.maschine}
-                      onChange={async (e) => {
-                        const v = e.target.value;
-                        updateItem(it.key, { maschine: v, warnung: "", last_mas_end: null });
-                        if (v) await suggestMasStart(v, it.key);
-                      }}
-                      className="control"
-                    >
-                      <option value="">Bitte wählen…</option>
-                      {machineOptions.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <div className="row2">
+                  <div className="inner">
                     <label className="field">
-                      Fahrtzeit (Min.)
-                      <input value={it.fahrtzeit_min} onChange={(e) => updateItem(it.key, { fahrtzeit_min: e.target.value })} inputMode="numeric" className="control" />
-                    </label>
-
-                    <label className="field">
-                      MAS Stunden (h) automatisch
-                      <input value={it.maschinenstunden_h} readOnly placeholder="(aus MAS Beginn/Ende)" className="control ro" />
-                    </label>
-                  </div>
-
-                  <div className="row2">
-                    <label className="field">
-                      MAS Beginn
-                      <input
-                        value={it.mas_start}
+                      Objekt *
+                      <select
+                        value={it.objekt}
                         onChange={(e) => {
                           const v = e.target.value;
-                          const next = { ...it, mas_start: v };
-                          const delta = calcMasHours(next);
+                          updateItem(it.key, { objekt: v });
 
-                          // wenn Twinch an und twinch_h leer -> auto füllen
-                          const maybeTwinch =
-                            it.twinch_used && (!it.twinch_h.trim() ? true : false) ? (delta === null ? "" : String(delta)) : it.twinch_h;
+                          // ✅ letztes Objekt merken
+                          if (userId) {
+                            try {
+                              localStorage.setItem(`waldzeit:last_objekt:${userId}`, v);
+                            } catch {}
+                          }
 
-                          updateItem(it.key, {
-                            mas_start: v,
-                            maschinenstunden_h: delta === null ? "" : String(delta),
-                            twinch_h: maybeTwinch,
-                          });
-
-                          checkMachineHoursForDay(it.key, next);
+                          if (v.trim().length >= 2) suggestFahrtzeit(v, it.key);
                         }}
-                        inputMode="decimal"
-                        placeholder="z.B. 2450.5"
                         className="control"
-                      />
+                      >
+                        <option value="">Bitte wählen…</option>
+                        {objectOptions.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
                     </label>
 
                     <label className="field">
-                      MAS Ende
-                      <input
-                        value={it.mas_end}
-                        onChange={(e) => {
+                      Maschine *
+                      <select
+                        value={it.maschine}
+                        onChange={async (e) => {
                           const v = e.target.value;
-                          const next = { ...it, mas_end: v };
-                          const delta = calcMasHours(next);
 
-                          const maybeTwinch =
-                            it.twinch_used && (!it.twinch_h.trim() ? true : false) ? (delta === null ? "" : String(delta)) : it.twinch_h;
+                          // ✅ Motorsäge: MAS komplett leeren + Warnung weg
+                          if (isMotorsaege(v)) {
+                            updateItem(it.key, {
+                              maschine: v,
+                              warnung: "",
+                              last_mas_end: null,
+                              mas_start: "",
+                              mas_end: "",
+                              maschinenstunden_h: "",
+                            });
+                            return;
+                          }
 
-                          updateItem(it.key, {
-                            mas_end: v,
-                            maschinenstunden_h: delta === null ? "" : String(delta),
-                            twinch_h: maybeTwinch,
-                          });
-
-                          checkMachineHoursForDay(it.key, next);
+                          updateItem(it.key, { maschine: v, warnung: "", last_mas_end: null });
+                          if (v) await suggestMasStart(v, it.key);
                         }}
-                        inputMode="decimal"
-                        placeholder="z.B. 2456.0"
                         className="control"
-                      />
+                      >
+                        <option value="">Bitte wählen…</option>
+                        {machineOptions.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
                     </label>
-                  </div>
 
-                  {it.warnung && <div className={it.warnung.includes("❌") ? "warn bad" : "warn"}>{it.warnung}</div>}
+                    <div className="row2">
+                      <label className="field">
+                        Fahrtzeit (Min.)
+                        <input value={it.fahrtzeit_min} onChange={(e) => updateItem(it.key, { fahrtzeit_min: e.target.value })} inputMode="numeric" className="control" />
+                      </label>
 
-                  <details className="subCard">
-                    <summary className="sum2">Tätigkeiten / Diesel / Details</summary>
-                    <div className="inner">
+                      <label className="field">
+                        MAS Stunden (h) automatisch
+                        <input value={it.maschinenstunden_h} readOnly placeholder={chainsaw ? "(Motorsäge: keine MAS)" : "(aus MAS Beginn/Ende)"} className="control ro" />
+                      </label>
+                    </div>
+
+                    {/* ✅ Motorsäge: MAS-Zeile komplett ausblenden und stattdessen Motormanuel hier anzeigen */}
+                    {!chainsaw ? (
                       <div className="row2">
                         <label className="field">
-                          Unterhalt (h)
-                          <input value={it.unterhalt_h} onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                        <label className="field">
-                          Reparatur (h)
-                          <input value={it.reparatur_h} onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                      </div>
-
-                      <div className="row2">
-                        <label className="field">
-                          Motormanuel (h)
-                          <input value={it.motormanuel_h} onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                        <label className="field">
-                          Umsetzen (h)
-                          <input value={it.umsetzen_h} onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                      </div>
-
-                      <div className="row2">
-                        <label className="field">
-                          Sonstiges (h)
-                          <input value={it.sonstiges_h} onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                        <label className="field">
-                          Sonstiges Beschreibung
+                          MAS Beginn
                           <input
-                            value={it.sonstiges_beschreibung}
-                            onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })}
-                            placeholder="z.B. Kette wechseln"
+                            value={it.mas_start}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              const next = { ...it, mas_start: v };
+                              const delta = calcMasHours(next);
+
+                              // wenn Twinch an und twinch_h leer -> auto füllen
+                              const maybeTwinch = it.twinch_used && (!it.twinch_h.trim() ? true : false) ? (delta === null ? "" : String(delta)) : it.twinch_h;
+
+                              updateItem(it.key, {
+                                mas_start: v,
+                                maschinenstunden_h: delta === null ? "" : String(delta),
+                                twinch_h: maybeTwinch,
+                              });
+
+                              checkMachineHoursForDay(it.key, next);
+                            }}
+                            inputMode="decimal"
+                            placeholder="z.B. 2450.5"
+                            className="control"
+                          />
+                        </label>
+
+                        <label className="field">
+                          MAS Ende
+                          <input
+                            value={it.mas_end}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              const next = { ...it, mas_end: v };
+                              const delta = calcMasHours(next);
+
+                              const maybeTwinch = it.twinch_used && (!it.twinch_h.trim() ? true : false) ? (delta === null ? "" : String(delta)) : it.twinch_h;
+
+                              updateItem(it.key, {
+                                mas_end: v,
+                                maschinenstunden_h: delta === null ? "" : String(delta),
+                                twinch_h: maybeTwinch,
+                              });
+
+                              checkMachineHoursForDay(it.key, next);
+                            }}
+                            inputMode="decimal"
+                            placeholder="z.B. 2456.0"
                             className="control"
                           />
                         </label>
                       </div>
-
+                    ) : (
                       <div className="row2">
                         <label className="field">
-                          Diesel (L)
-                          <input value={it.diesel_l} onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                        <label className="field">
-                          AdBlue (L)
-                          <input value={it.adblue_l} onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })} inputMode="decimal" className="control" />
-                        </label>
-                      </div>
-
-                      <div className="row2">
-                        <label className="chk">
+                          Motormanuel (h)
                           <input
-                            type="checkbox"
-                            checked={it.twinch_used}
-                            onChange={(e) => {
-                              const v = e.target.checked;
-
-                              // Vorschlag: wenn leer -> nimm MAS-Stunden
-                              const nextTwinch = v && !it.twinch_h.trim() ? it.maschinenstunden_h : it.twinch_h;
-
-                              updateItem(it.key, { twinch_used: v, twinch_h: nextTwinch });
-                            }}
-                          />
-                          Twinch genutzt
-                        </label>
-
-                        <label className="field">
-                          Twinch Stunden (h)
-                          <input
-                            value={it.twinch_h}
-                            disabled={!it.twinch_used}
-                            onChange={(e) => updateItem(it.key, { twinch_h: e.target.value })}
+                            value={it.motormanuel_h}
+                            onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })}
                             inputMode="decimal"
-                            placeholder="z.B. 1.5"
-                            className={`control ${!it.twinch_used ? "ro" : ""}`}
+                            placeholder="z.B. 2.0"
+                            className="control"
                           />
                         </label>
+
+                        <div className="field">
+                          <div style={{ marginTop: 6, opacity: 0.75, fontWeight: 800 }}>Hinweis</div>
+                          <div style={{ marginTop: 8, opacity: 0.8 }}>
+                            Motorsäge: keine Maschinenstunden (MAS). Bitte Motormanuel hier eintragen.
+                          </div>
+                        </div>
                       </div>
+                    )}
 
-                      <label className="field">
-                        Einsatz Kommentar
-                        <textarea value={it.kommentar} onChange={(e) => updateItem(it.key, { kommentar: e.target.value })} className="control" style={{ minHeight: 80 }} />
-                      </label>
-                    </div>
-                  </details>
+                    {!chainsaw && it.warnung && <div className={it.warnung.includes("❌") ? "warn bad" : "warn"}>{it.warnung}</div>}
 
-                  <button type="button" onClick={() => removeItem(it.key)} className="btnSm" style={{ width: "fit-content" }}>
-                    Einsatz löschen
-                  </button>
-                </div>
-              </details>
-            ))}
+                    <details className="subCard">
+                      <summary className="sum2">Tätigkeiten / Diesel / Details</summary>
+                      <div className="inner">
+                        <div className="row2">
+                          <label className="field">
+                            Unterhalt (h)
+                            <input value={it.unterhalt_h} onChange={(e) => updateItem(it.key, { unterhalt_h: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                          <label className="field">
+                            Reparatur (h)
+                            <input value={it.reparatur_h} onChange={(e) => updateItem(it.key, { reparatur_h: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                        </div>
+
+                        <div className="row2">
+                          {/* ✅ Motorsäge: Motormanuel ist oben sichtbar, hier ausblenden um Dopplung zu vermeiden */}
+                          {!chainsaw ? (
+                            <label className="field">
+                              Motormanuel (h)
+                              <input value={it.motormanuel_h} onChange={(e) => updateItem(it.key, { motormanuel_h: e.target.value })} inputMode="decimal" className="control" />
+                            </label>
+                          ) : (
+                            <div />
+                          )}
+
+                          <label className="field">
+                            Umsetzen (h)
+                            <input value={it.umsetzen_h} onChange={(e) => updateItem(it.key, { umsetzen_h: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                        </div>
+
+                        <div className="row2">
+                          <label className="field">
+                            Sonstiges (h)
+                            <input value={it.sonstiges_h} onChange={(e) => updateItem(it.key, { sonstiges_h: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                          <label className="field">
+                            Sonstiges Beschreibung
+                            <input
+                              value={it.sonstiges_beschreibung}
+                              onChange={(e) => updateItem(it.key, { sonstiges_beschreibung: e.target.value })}
+                              placeholder="z.B. Kette wechseln"
+                              className="control"
+                            />
+                          </label>
+                        </div>
+
+                        <div className="row2">
+                          <label className="field">
+                            Diesel (L)
+                            <input value={it.diesel_l} onChange={(e) => updateItem(it.key, { diesel_l: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                          <label className="field">
+                            AdBlue (L)
+                            <input value={it.adblue_l} onChange={(e) => updateItem(it.key, { adblue_l: e.target.value })} inputMode="decimal" className="control" />
+                          </label>
+                        </div>
+
+                        <div className="row2">
+                          <label className="chk">
+                            <input
+                              type="checkbox"
+                              checked={it.twinch_used}
+                              onChange={(e) => {
+                                const v = e.target.checked;
+
+                                // Vorschlag: wenn leer -> nimm MAS-Stunden
+                                const nextTwinch = v && !it.twinch_h.trim() ? it.maschinenstunden_h : it.twinch_h;
+
+                                updateItem(it.key, { twinch_used: v, twinch_h: nextTwinch });
+                              }}
+                            />
+                            Twinch genutzt
+                          </label>
+
+                          <label className="field">
+                            Twinch Stunden (h)
+                            <input
+                              value={it.twinch_h}
+                              disabled={!it.twinch_used}
+                              onChange={(e) => updateItem(it.key, { twinch_h: e.target.value })}
+                              inputMode="decimal"
+                              placeholder="z.B. 1.5"
+                              className={`control ${!it.twinch_used ? "ro" : ""}`}
+                            />
+                          </label>
+                        </div>
+
+                        <label className="field">
+                          Einsatz Kommentar
+                          <textarea value={it.kommentar} onChange={(e) => updateItem(it.key, { kommentar: e.target.value })} className="control" style={{ minHeight: 80 }} />
+                        </label>
+                      </div>
+                    </details>
+
+                    <button type="button" onClick={() => removeItem(it.key)} className="btnSm" style={{ width: "fit-content" }}>
+                      Einsatz löschen
+                    </button>
+                  </div>
+                </details>
+              );
+            })}
           </div>
         </section>
       )}
