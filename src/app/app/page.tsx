@@ -15,7 +15,7 @@ type DriverRow = {
 type DayRow = {
   id: string;
   date: string; // YYYY-MM-DD
-  user_id: string; // ✅ wichtig!
+  user_id: string;
   is_urlaub?: boolean | null;
   is_wetter?: boolean | null;
 };
@@ -29,19 +29,18 @@ type DayUI = {
   id: string;
   date: string;
   user_id: string;
-  driver: string; // ✅ Anzeige-Name
-  objekte: string[]; // unique
+  driver: string; // leer für Nicht-Admin
+  objekte: string[];
   isUrlaub: boolean;
   isWetter: boolean;
 };
 
-// ✅ Robust: ISO-Week in UTC (verhindert „Gruppierung kaputt“ durch Zeitzone)
 function isoWeekKey(dateISO: string) {
   const [y, m, d] = dateISO.split("-").map((x) => Number(x));
   const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
 
-  const day = date.getUTCDay() || 7; // Mon=1..Sun=7
-  date.setUTCDate(date.getUTCDate() + 4 - day); // Thursday
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
 
   const isoYear = date.getUTCFullYear();
 
@@ -51,7 +50,6 @@ function isoWeekKey(dateISO: string) {
   firstThursday.setUTCDate(firstThursday.getUTCDate() + (4 - yearStartDay));
 
   const week = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
-
   return `${isoYear}-KW${String(week).padStart(2, "0")}`;
 }
 
@@ -67,10 +65,21 @@ export default function Overview() {
 
   const [isAdmin, setIsAdmin] = useState(false);
 
-  async function load() {
+  async function loadIsAdmin() {
+    const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
+    if (error) {
+      setIsAdmin(false);
+      return false;
+    }
+    const ok = ((data as any[]) ?? []).length > 0;
+    setIsAdmin(ok);
+    return ok;
+  }
+
+  async function load(adminFlag: boolean) {
     setMsg("Lade...");
 
-    // ✅ 1) Workdays inkl. user_id laden
+    // 1) Workdays inkl. user_id
     const { data: dayData, error: dayErr } = await supabase
       .from("workdays")
       .select("id,date,user_id,is_urlaub,is_wetter")
@@ -86,23 +95,24 @@ export default function Overview() {
     const rawDays = ((dayData as any[]) ?? []) as DayRow[];
     const ids = rawDays.map((d) => d.id);
 
-    // ✅ 2) Fahrer-Map laden (für Anzeige-Namen pro user_id)
-    const { data: drvData, error: drvErr } = await supabase
-      .from("driver_profiles")
-      .select("user_id,username,full_name,is_active")
-      .eq("is_active", true);
-
-    // Wenn RLS/Policy blockiert: trotzdem weiter, dann werden Namen "(unbekannt)"
+    // 2) Fahrer-Namen NUR für Admin laden
     const driverMap = new Map<string, string>();
-    if (!drvErr) {
-      const drv = (((drvData as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
-      for (const r of drv) {
-        const label = (r.full_name ?? "").trim() || (r.username ?? "").trim() || r.user_id;
-        driverMap.set(r.user_id, label);
+    if (adminFlag) {
+      const { data: drvData, error: drvErr } = await supabase
+        .from("driver_profiles")
+        .select("user_id,username,full_name,is_active")
+        .eq("is_active", true);
+
+      if (!drvErr) {
+        const drv = (((drvData as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
+        for (const r of drv) {
+          const label = (r.full_name ?? "").trim() || (r.username ?? "").trim() || r.user_id;
+          driverMap.set(r.user_id, label);
+        }
       }
     }
 
-    // ✅ 3) Objekte der Einsätze für diese Tage
+    // 3) Items
     let itemData: ItemRow[] = [];
     if (ids.length > 0) {
       const { data: items, error: itemErr } = await supabase
@@ -133,13 +143,12 @@ export default function Overview() {
       const objs = map.get(d.id) ?? [];
       const uniq = Array.from(new Set(objs)).sort((a, b) => a.localeCompare(b));
 
-      const driverLabel = driverMap.get(d.user_id) ?? "(unbekannt)";
-
       return {
         id: d.id,
         date: d.date,
         user_id: d.user_id,
-        driver: driverLabel,
+        // ✅ nur Admin sieht Namen
+        driver: adminFlag ? driverMap.get(d.user_id) ?? "" : "",
         objekte: uniq,
         isUrlaub: !!d.is_urlaub,
         isWetter: !!d.is_wetter,
@@ -150,15 +159,6 @@ export default function Overview() {
     setMsg("");
   }
 
-  async function loadIsAdmin() {
-    const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
-    if (error) {
-      setIsAdmin(false);
-      return;
-    }
-    setIsAdmin((data as any[])?.length > 0);
-  }
-
   useEffect(() => {
     (async () => {
       const me = await getMe();
@@ -167,7 +167,9 @@ export default function Overview() {
         return;
       }
       setMeName(me.firstName);
-      await Promise.all([loadIsAdmin(), load()]);
+
+      const adminFlag = await loadIsAdmin();
+      await load(adminFlag);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -214,7 +216,7 @@ export default function Overview() {
     }
 
     setMsg("✅ Gelöscht!");
-    await load();
+    await load(isAdmin);
     setTimeout(() => setMsg(""), 600);
   }
 
@@ -248,7 +250,13 @@ export default function Overview() {
           <button className="btnPrimary">+ Neuer Tag</button>
         </Link>
 
-        <button onClick={load} className="btn">
+        <button
+          onClick={async () => {
+            const adminFlag = await loadIsAdmin();
+            await load(adminFlag);
+          }}
+          className="btn"
+        >
           Aktualisieren
         </button>
       </div>
@@ -273,10 +281,14 @@ export default function Overview() {
                         <b>{fmtDE(d.date)}</b>
                       </div>
 
-                      {/* ✅ Fahrer + Inhalt */}
                       <div style={{ marginTop: 6, opacity: 0.95 }}>
-                        <b>{d.driver}</b>
-                        <span style={{ opacity: 0.55 }}> · </span>
+                        {/* ✅ Fahrer nur für Admin */}
+                        {isAdmin && d.driver ? (
+                          <>
+                            <b>{d.driver}</b>
+                            <span style={{ opacity: 0.55 }}> · </span>
+                          </>
+                        ) : null}
 
                         {d.isUrlaub ? (
                           <span style={{ fontWeight: 900 }}>🌴 Urlaub</span>
