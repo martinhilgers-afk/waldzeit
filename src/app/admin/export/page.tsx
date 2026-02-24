@@ -62,20 +62,16 @@ function todayISO() {
   return `${y}-${m}-${day}`;
 }
 
-// ✅ FIX: robust CSV builder (verhindert TS/Runtime-Probleme mit "Record statt Array")
-function toCSV(input: unknown) {
-  const rows: Record<string, any>[] = Array.isArray(input)
-    ? (input as Record<string, any>[])
-    : input && typeof input === "object"
-      ? [input as Record<string, any>]
-      : [];
+// ✅ TS-sicher: erwartet IMMER Array
+function toCSV(rows: Array<Record<string, any>>) {
+  const headerSet = new Set<string>();
 
-  const headers = Array.from(
-    rows.reduce((set, r) => {
-      Object.keys(r || {}).forEach((k) => set.add(k));
-      return set;
-    }, new Set<string>())
-  );
+  for (const r of rows) {
+    if (!r) continue;
+    for (const k of Object.keys(r)) headerSet.add(k);
+  }
+
+  const headers = Array.from(headerSet);
 
   const escape = (v: any) => {
     const s = v === null || v === undefined ? "" : String(v);
@@ -122,8 +118,6 @@ export default function AdminExportPage() {
 
   const [machines, setMachines] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
-
-  // Fahrer-Liste: distinct user_id aus workdays
   const [drivers, setDrivers] = useState<{ id: string; label: string }[]>([]);
 
   const [selectedMachine, setSelectedMachine] = useState("");
@@ -134,7 +128,6 @@ export default function AdminExportPage() {
   const [loading, setLoading] = useState(false);
 
   async function loadIsAdmin() {
-    // RLS/Policies entscheiden, ob diese Query klappt. Wenn blockiert -> nicht admin.
     const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
     if (error) {
       setAdmin(false);
@@ -152,7 +145,6 @@ export default function AdminExportPage() {
     setMachines((((m.data as any[]) ?? []) as any[]).map((x) => x.name));
     setObjects((((o.data as any[]) ?? []) as any[]).map((x) => x.name));
 
-    // Fahrer: distinct user_id aus workdays (client-side unique)
     const { data: wd, error } = await supabase.from("workdays").select("user_id").limit(5000);
     if (!error) {
       const uniq = Array.from(
@@ -176,21 +168,10 @@ export default function AdminExportPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const needsRange = useMemo(() => {
-    return mode === "machine_range" || mode === "driver_range" || mode === "all_range";
-  }, [mode]);
-
-  const needsMachine = useMemo(() => {
-    return mode === "machine_range" || mode === "machine_object";
-  }, [mode]);
-
-  const needsDriver = useMemo(() => {
-    return mode === "driver_range" || mode === "driver_object";
-  }, [mode]);
-
-  const needsObject = useMemo(() => {
-    return mode === "machine_object" || mode === "driver_object" || mode === "all_object";
-  }, [mode]);
+  const needsRange = useMemo(() => mode === "machine_range" || mode === "driver_range" || mode === "all_range", [mode]);
+  const needsMachine = useMemo(() => mode === "machine_range" || mode === "machine_object", [mode]);
+  const needsDriver = useMemo(() => mode === "driver_range" || mode === "driver_object", [mode]);
+  const needsObject = useMemo(() => mode === "machine_object" || mode === "driver_object" || mode === "all_object", [mode]);
 
   async function runExport() {
     if (admin !== true) {
@@ -198,27 +179,14 @@ export default function AdminExportPage() {
       return;
     }
 
-    if (needsRange && (!from || !to)) {
-      setMsg("Bitte Zeitraum (von/bis) setzen.");
-      return;
-    }
-    if (needsMachine && !selectedMachine) {
-      setMsg("Bitte Maschine wählen.");
-      return;
-    }
-    if (needsDriver && !selectedDriver) {
-      setMsg("Bitte Fahrer wählen.");
-      return;
-    }
-    if (needsObject && !selectedObject) {
-      setMsg("Bitte Objekt wählen.");
-      return;
-    }
+    if (needsRange && (!from || !to)) return setMsg("Bitte Zeitraum (von/bis) setzen.");
+    if (needsMachine && !selectedMachine) return setMsg("Bitte Maschine wählen.");
+    if (needsDriver && !selectedDriver) return setMsg("Bitte Fahrer wählen.");
+    if (needsObject && !selectedObject) return setMsg("Bitte Objekt wählen.");
 
     setLoading(true);
     setMsg("Export wird geladen...");
 
-    // 1) Workdays filtern
     let q = supabase
       .from("workdays")
       .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,created_at")
@@ -237,7 +205,6 @@ export default function AdminExportPage() {
     const days = (((dayData as any[]) ?? []) as any[]) as DayRow[];
     const dayIds = days.map((d) => d.id);
 
-    // 2) Items holen
     let items: ItemRow[] = [];
     if (dayIds.length > 0) {
       const { data: itemData, error: itemErr } = await supabase
@@ -252,11 +219,9 @@ export default function AdminExportPage() {
         setMsg("Fehler Work Items: " + itemErr.message);
         return;
       }
-
       items = (((itemData as any[]) ?? []) as any[]) as ItemRow[];
     }
 
-    // 3) Filter auf Objekt/Maschine (wenn nötig)
     if (needsMachine) {
       const m = selectedMachine.trim();
       items = items.filter((it) => (it.maschine ?? "").trim() === m);
@@ -266,10 +231,9 @@ export default function AdminExportPage() {
       items = items.filter((it) => (it.objekt ?? "").trim() === o);
     }
 
-    // 4) Join day + item -> rows
     const dayMap = new Map(days.map((d) => [d.id, d] as const));
 
-    const rows = items.map((it) => {
+    const rows: Array<Record<string, any>> = items.map((it) => {
       const d = dayMap.get(it.workday_id);
       return {
         date: d?.date ?? "",
@@ -305,10 +269,9 @@ export default function AdminExportPage() {
       };
     });
 
-    // Spezialfall: keine Items (z.B. nur Urlaub/Wetter) => trotzdem Workdays exportieren
     const hasNoItems = rows.length === 0 && days.length > 0;
 
-    const finalRows = hasNoItems
+    const finalRows: Array<Record<string, any>> = hasNoItems
       ? days.map((d) => ({
           date: d.date,
           user_id: d.user_id,
@@ -347,15 +310,13 @@ export default function AdminExportPage() {
 
     const filename = `export_${labelParts.join("__").replace(/[^\w\-ÄÖÜäöüß]/g, "_")}.csv`;
 
-    // ✅ FIX: always pass array (never object)
-    const csv = toCSV(finalRows ?? []);
+    const csv = toCSV(finalRows);
     downloadText(filename, csv);
 
     setLoading(false);
     setMsg(`✅ Export fertig: ${finalRows.length} Zeilen`);
   }
 
-  // ✅ Loading-State für Admin-Check (sonst flackert "kein Zugriff")
   if (admin === null) {
     return (
       <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
