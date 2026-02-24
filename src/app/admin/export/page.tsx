@@ -62,28 +62,34 @@ function todayISO() {
   return `${y}-${m}-${day}`;
 }
 
-function toCSV(rows: Record<string, any>[]) {
+// ✅ FIX: robust CSV builder (verhindert TS/Runtime-Probleme mit "Record statt Array")
+function toCSV(input: unknown) {
+  const rows: Record<string, any>[] = Array.isArray(input)
+    ? (input as Record<string, any>[])
+    : input && typeof input === "object"
+      ? [input as Record<string, any>]
+      : [];
+
   const headers = Array.from(
     rows.reduce((set, r) => {
-      Object.keys(r).forEach((k) => set.add(k));
+      Object.keys(r || {}).forEach((k) => set.add(k));
       return set;
     }, new Set<string>())
   );
 
-  const esc = (v: any) => {
-    if (v === null || v === undefined) return "";
-    const s = String(v);
-    // CSV escaping
-    if (s.includes('"') || s.includes(",") || s.includes("\n") || s.includes("\r")) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
+  const escape = (v: any) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    const needsQuotes = /[",\n\r;]/.test(s);
+    const safe = s.replace(/"/g, '""');
+    return needsQuotes ? `"${safe}"` : safe;
   };
 
-  const lines = [
-    headers.join(","),
-    ...rows.map((r) => headers.map((h) => esc(r[h])).join(",")),
-  ];
+  const lines: string[] = [];
+  lines.push(headers.join(";"));
+
+  for (const r of rows) {
+    lines.push(headers.map((h) => escape(r?.[h])).join(";"));
+  }
 
   return lines.join("\n");
 }
@@ -102,12 +108,11 @@ function downloadText(filename: string, text: string) {
 
 export default function AdminExportPage() {
   const [meName, setMeName] = useState("");
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [admin, setAdmin] = useState<boolean | null>(null);
 
   const [mode, setMode] = useState<ExportMode>("machine_range");
 
   const [from, setFrom] = useState<string>(() => {
-    // default: first day of current month
     const d = new Date();
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -118,7 +123,7 @@ export default function AdminExportPage() {
   const [machines, setMachines] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
 
-  // Fahrer-Liste: wir lesen distinct user_id aus workdays
+  // Fahrer-Liste: distinct user_id aus workdays
   const [drivers, setDrivers] = useState<{ id: string; label: string }[]>([]);
 
   const [selectedMachine, setSelectedMachine] = useState("");
@@ -129,12 +134,13 @@ export default function AdminExportPage() {
   const [loading, setLoading] = useState(false);
 
   async function loadIsAdmin() {
+    // RLS/Policies entscheiden, ob diese Query klappt. Wenn blockiert -> nicht admin.
     const { data, error } = await supabase.from("admin_users").select("user_id").limit(1);
     if (error) {
-      setIsAdmin(false);
+      setAdmin(false);
       return;
     }
-    setIsAdmin((data as any[])?.length > 0);
+    setAdmin(((data as any[]) ?? []).length > 0);
   }
 
   async function loadSelectors() {
@@ -143,14 +149,15 @@ export default function AdminExportPage() {
       supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
     ]);
 
-    setMachines(((m.data as any[]) ?? []).map((x) => x.name));
-    setObjects(((o.data as any[]) ?? []).map((x) => x.name));
+    setMachines((((m.data as any[]) ?? []) as any[]).map((x) => x.name));
+    setObjects((((o.data as any[]) ?? []) as any[]).map((x) => x.name));
 
-    // Fahrer: distinct user_id aus workdays (Supabase: select user_id und dann unique im client)
+    // Fahrer: distinct user_id aus workdays (client-side unique)
     const { data: wd, error } = await supabase.from("workdays").select("user_id").limit(5000);
     if (!error) {
-      const uniq = Array.from(new Set(((wd as any[]) ?? []).map((x) => x.user_id).filter(Boolean)));
-      // label erstmal user_id (später können wir Profil-Vornamen sauber in eigener Tabelle speichern)
+      const uniq = Array.from(
+        new Set((((wd as any[]) ?? []) as any[]).map((x) => x.user_id).filter(Boolean))
+      );
       setDrivers(uniq.map((id) => ({ id, label: id })));
     }
   }
@@ -186,12 +193,11 @@ export default function AdminExportPage() {
   }, [mode]);
 
   async function runExport() {
-    if (!isAdmin) {
+    if (admin !== true) {
       setMsg("❌ Kein Admin-Zugriff.");
       return;
     }
 
-    // Basic validation
     if (needsRange && (!from || !to)) {
       setMsg("Bitte Zeitraum (von/bis) setzen.");
       return;
@@ -218,13 +224,8 @@ export default function AdminExportPage() {
       .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,created_at")
       .order("date", { ascending: true });
 
-    if (needsRange) {
-      q = q.gte("date", from).lte("date", to);
-    }
-
-    if (needsDriver) {
-      q = q.eq("user_id", selectedDriver);
-    }
+    if (needsRange) q = q.gte("date", from).lte("date", to);
+    if (needsDriver) q = q.eq("user_id", selectedDriver);
 
     const { data: dayData, error: dayErr } = await q;
     if (dayErr) {
@@ -233,7 +234,7 @@ export default function AdminExportPage() {
       return;
     }
 
-    const days = ((dayData as any[]) ?? []) as DayRow[];
+    const days = (((dayData as any[]) ?? []) as any[]) as DayRow[];
     const dayIds = days.map((d) => d.id);
 
     // 2) Items holen
@@ -251,19 +252,22 @@ export default function AdminExportPage() {
         setMsg("Fehler Work Items: " + itemErr.message);
         return;
       }
-      items = ((itemData as any[]) ?? []) as ItemRow[];
+
+      items = (((itemData as any[]) ?? []) as any[]) as ItemRow[];
     }
 
     // 3) Filter auf Objekt/Maschine (wenn nötig)
     if (needsMachine) {
-      items = items.filter((it) => (it.maschine ?? "").trim() === selectedMachine.trim());
+      const m = selectedMachine.trim();
+      items = items.filter((it) => (it.maschine ?? "").trim() === m);
     }
     if (needsObject) {
-      items = items.filter((it) => (it.objekt ?? "").trim() === selectedObject.trim());
+      const o = selectedObject.trim();
+      items = items.filter((it) => (it.objekt ?? "").trim() === o);
     }
 
     // 4) Join day + item -> rows
-    const dayMap = new Map(days.map((d) => [d.id, d]));
+    const dayMap = new Map(days.map((d) => [d.id, d] as const));
 
     const rows = items.map((it) => {
       const d = dayMap.get(it.workday_id);
@@ -301,8 +305,9 @@ export default function AdminExportPage() {
       };
     });
 
-    // Spezialfall: Export ohne Items? Dann trotzdem Workdays als Zeilen exportieren (Urlaub/Wetter)
+    // Spezialfall: keine Items (z.B. nur Urlaub/Wetter) => trotzdem Workdays exportieren
     const hasNoItems = rows.length === 0 && days.length > 0;
+
     const finalRows = hasNoItems
       ? days.map((d) => ({
           date: d.date,
@@ -312,6 +317,7 @@ export default function AdminExportPage() {
           arbeitsbeginn: d.arbeitsbeginn ?? "",
           arbeitsende: d.arbeitsende ?? "",
           tages_kommentar: d.kommentar ?? "",
+
           objekt: "",
           maschine: "",
           fahrtzeit_min: "",
@@ -341,14 +347,25 @@ export default function AdminExportPage() {
 
     const filename = `export_${labelParts.join("__").replace(/[^\w\-ÄÖÜäöüß]/g, "_")}.csv`;
 
-    const csv = toCSV(finalRows);
+    // ✅ FIX: always pass array (never object)
+    const csv = toCSV(finalRows ?? []);
     downloadText(filename, csv);
 
     setLoading(false);
     setMsg(`✅ Export fertig: ${finalRows.length} Zeilen`);
   }
 
-  if (!isAdmin) {
+  // ✅ Loading-State für Admin-Check (sonst flackert "kein Zugriff")
+  if (admin === null) {
+    return (
+      <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
+        <h1 style={{ margin: 0 }}>Admin · Export</h1>
+        <p style={{ marginTop: 10 }}>Lade…</p>
+      </main>
+    );
+  }
+
+  if (admin === false) {
     return (
       <main style={{ maxWidth: 900, margin: "24px auto", padding: 12 }}>
         <h1 style={{ margin: 0 }}>Admin · Export</h1>
