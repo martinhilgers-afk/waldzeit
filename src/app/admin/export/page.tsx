@@ -133,6 +133,10 @@ function toCSV(rows: Array<Record<string, any>>) {
   const headers = [...preferred.filter((h) => headerSet.has(h)), ...rest];
 
   const lines: string[] = [];
+
+  // ✅ Excel-Trick: Semikolon als Trenner erkennen
+  lines.push("sep=;");
+
   lines.push(headers.join(";"));
   for (const r of rows) {
     lines.push(headers.map((h) => csvEscape(r?.[h])).join(";"));
@@ -141,7 +145,10 @@ function toCSV(rows: Array<Record<string, any>>) {
 }
 
 function downloadText(filename: string, text: string) {
-  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  // ✅ WICHTIG: UTF-8 BOM für Excel (sonst: DÃ©placement usw.)
+  const withBom = "\uFEFF" + text;
+
+  const blob = new Blob([withBom], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -171,7 +178,7 @@ export default function AdminExportPage() {
   const [objects, setObjects] = useState<string[]>([]);
   const [drivers, setDrivers] = useState<Array<{ id: string; label: string }>>([]);
 
-  // ✅ NEU: Mapping für driver Feld (user_id -> Name)
+  // Mapping für driver Feld (user_id -> Name)
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
   const [selectedMachine, setSelectedMachine] = useState("");
@@ -215,13 +222,12 @@ export default function AdminExportPage() {
     const drvRows = (((d.data as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
 
     const drv = drvRows.map((x) => ({
-      id: x.user_id, // value ist UUID
+      id: x.user_id,
       label: x.full_name?.trim() || x.username?.trim() || x.user_id,
     }));
 
     setDrivers(drv);
 
-    // ✅ Map bauen: user_id -> label
     const map = new Map<string, string>();
     for (const x of drvRows) {
       const label = x.full_name?.trim() || x.username?.trim() || x.user_id;
@@ -356,7 +362,7 @@ export default function AdminExportPage() {
       };
     });
 
-    // 5) Special-Days (Urlaub/Wetter) nur dann exportieren, wenn KEIN item-filter aktiv ist
+    // 5) Special-Days (Urlaub/Wetter) nur exportieren, wenn KEIN item-filter aktiv ist
     const hasItemFilter = needsMachine || needsObject;
     const specialDayRows: Array<Record<string, any>> = hasItemFilter
       ? []
@@ -407,11 +413,7 @@ export default function AdminExportPage() {
 
     downloadText(filename, toCSV(finalRows));
     setLoading(false);
-    setMsg(
-      finalRows.length === 0
-        ? "✅ Keine Daten im Filter. Leere CSV exportiert."
-        : `✅ Export fertig: ${finalRows.length} Zeilen`
-    );
+    setMsg(finalRows.length === 0 ? "✅ Keine Daten im Filter. Leere CSV exportiert." : `✅ Export fertig: ${finalRows.length} Zeilen`);
   }
 
   if (admin === null) {
