@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import ExcelJS from "exceljs";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
 
@@ -11,10 +12,11 @@ type ExportMode =
   | "machine_object"
   | "driver_object"
   | "all_range"
-  | "all_object";
+  | "all_object"
+  | "monthly_driver_tables";
 
 type DriverRow = {
-  user_id: string; // uuid
+  user_id: string;
   username: string | null;
   full_name: string | null;
   default_machine: string | null;
@@ -24,7 +26,7 @@ type DriverRow = {
 type DayRow = {
   id: string;
   user_id: string;
-  date: string; // YYYY-MM-DD
+  date: string;
   arbeitsbeginn: string | null;
   arbeitsende: string | null;
   kommentar: string | null;
@@ -59,6 +61,11 @@ type ItemRow = {
   twinch_h: number | null;
 };
 
+type DriverOption = {
+  id: string;
+  label: string;
+};
+
 function todayISO() {
   const d = new Date();
   const y = d.getFullYear();
@@ -75,80 +82,319 @@ function firstOfMonthISO() {
 }
 
 function sanitizeFilename(s: string) {
-  return s.replace(/[^\w\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
+  return s.replace(/[^\w.\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
 }
 
-function csvEscape(v: any) {
+function excelValue(v: any) {
   if (v === null || v === undefined) return "";
-
-  const raw = String(v).trim();
-
-  // erkennt Zahlen wie: 12 | -3 | 0.5 | 3.5 | 3,5
-  const looksNumeric = /^-?\d+([.,]\d+)?$/.test(raw);
-
-  // Excel (DE): Dezimalpunkt -> Dezimalkomma (ohne Quotes, damit es Zahl bleibt)
-  const s = looksNumeric ? raw.replace(".", ",") : raw;
-
-  if (/[;\n\r"]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
+  return v;
 }
 
-function toCSV(rows: Array<Record<string, any>>) {
-  const headerSet = new Set<string>();
-  for (const r of rows) {
-    if (!r) continue;
-    for (const k of Object.keys(r)) headerSet.add(k);
+function listDatesInRange(from: string, to: string) {
+  const result: string[] = [];
+  if (!from || !to) return result;
+
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
+
+  const cur = new Date(start);
+  while (cur <= end) {
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, "0");
+    const d = String(cur.getDate()).padStart(2, "0");
+    result.push(`${y}-${m}-${d}`);
+    cur.setDate(cur.getDate() + 1);
   }
 
-  const preferred = [
-    "date",
-    "objekt",
-    "driver",
-    "maschine",
-    "is_urlaub",
-    "is_wetter",
-    "arbeitsbeginn",
-    "arbeitsende",
-    "tages_kommentar",
-    "fahrtzeit_min",
-    "mas_start",
-    "mas_end",
-    "maschinenstunden_h",
-    "unterhalt_h",
-    "reparatur_h",
-    "motormanuel_h",
-    "umsetzen_h",
-    "sonstiges_h",
-    "sonstiges_beschreibung",
-    "diesel_l",
-    "adblue_l",
-    "einsatz_kommentar",
-    "twinch_used",
-    "twinch_h",
-  ];
-
-  const rest = Array.from(headerSet)
-    .filter((h) => !preferred.includes(h))
-    .sort((a, b) => a.localeCompare(b));
-  const headers = [...preferred.filter((h) => headerSet.has(h)), ...rest];
-
-  const lines: string[] = [];
-
-  // ✅ Excel-Trick: Semikolon als Trenner erkennen
-  lines.push("sep=;");
-
-  lines.push(headers.join(";"));
-  for (const r of rows) {
-    lines.push(headers.map((h) => csvEscape(r?.[h])).join(";"));
-  }
-  return lines.join("\n");
+  return result;
 }
 
-function downloadText(filename: string, text: string) {
-  // ✅ WICHTIG: UTF-8 BOM für Excel (sonst: DÃ©placement usw.)
-  const withBom = "\uFEFF" + text;
+function sortByLastnameLabel(a: DriverOption, b: DriverOption) {
+  const getLastName = (label: string) => {
+    const parts = String(label || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    return parts.length === 0 ? "" : parts[parts.length - 1].toLowerCase();
+  };
 
-  const blob = new Blob([withBom], { type: "text/csv;charset=utf-8" });
+  const lastA = getLastName(a.label);
+  const lastB = getLastName(b.label);
+
+  const cmpLast = lastA.localeCompare(lastB, "de", { sensitivity: "base" });
+  if (cmpLast !== 0) return cmpLast;
+
+  return String(a.label || "").localeCompare(String(b.label || ""), "de", {
+    sensitivity: "base",
+  });
+}
+
+function isWeekendISO(date: string) {
+  const d = new Date(`${date}T00:00:00`);
+  const day = d.getDay();
+  return day === 0 || day === 6;
+}
+
+const SHEET_HEADERS = [
+  "Datum",
+  "Objekt",
+  "Maschine",
+  "Fahrtzeit [min]",
+  "MAS",
+  "Unterhalt",
+  "Reparatur",
+  "Motormanuel",
+  "Umsetzen",
+  "Sonstiges",
+  "Beschreibung",
+  "Arbeitstag",
+  "Urlaub",
+  "Wetter",
+  "Twinch",
+  "Beginn",
+  "Ende",
+  "MAS Start",
+  "MAS Ende",
+  "Diesel",
+  "Adblue",
+  "Tageskommentar",
+  "Einsatzkommentar",
+] as const;
+
+type SheetHeader = (typeof SHEET_HEADERS)[number];
+
+function makeRow(values?: Partial<Record<SheetHeader, any>>) {
+  return {
+    Datum: "",
+    Objekt: "",
+    Maschine: "",
+    "Fahrtzeit [min]": "",
+    MAS: "",
+    Unterhalt: "",
+    Reparatur: "",
+    Motormanuel: "",
+    Umsetzen: "",
+    Sonstiges: "",
+    Beschreibung: "",
+    Arbeitstag: "",
+    Urlaub: "",
+    Wetter: "",
+    Twinch: "",
+    Beginn: "",
+    Ende: "",
+    "MAS Start": "",
+    "MAS Ende": "",
+    Diesel: "",
+    Adblue: "",
+    Tageskommentar: "",
+    Einsatzkommentar: "",
+    ...(values || {}),
+  };
+}
+
+function hasWorkedDay(day: DayRow | undefined, item?: ItemRow | null) {
+  const hasDayTime = !!(day?.arbeitsbeginn || day?.arbeitsende);
+  const hasDayComment = !!String(day?.kommentar || "").trim();
+
+  const hasItemData =
+    !!item &&
+    (!!String(item.objekt || "").trim() ||
+      !!String(item.maschine || "").trim() ||
+      item.fahrtzeit_min !== null ||
+      item.mas_start !== null ||
+      item.mas_end !== null ||
+      item.maschinenstunden_h !== null ||
+      item.unterhalt_h !== null ||
+      item.reparatur_h !== null ||
+      item.motormanuel_h !== null ||
+      item.umsetzen_h !== null ||
+      item.sonstiges_h !== null ||
+      !!String(item.sonstiges_beschreibung || "").trim() ||
+      item.diesel_l !== null ||
+      item.adblue_l !== null ||
+      !!String(item.kommentar || "").trim() ||
+      item.twinch_h !== null);
+
+  return hasDayTime || hasDayComment || hasItemData;
+}
+
+function buildExportRows(
+  days: DayRow[],
+  items: ItemRow[],
+  driverMap: Map<string, string>,
+  hasItemFilter: boolean
+) {
+  const dayMap = new Map<string, DayRow>(days.map((d) => [d.id, d]));
+  const workedDaySeen = new Set<string>();
+
+  const itemRows: Array<Record<string, any>> = items.map((it) => {
+    const d = dayMap.get(it.workday_id);
+    const drvName = d?.user_id ? driverMap.get(d.user_id) ?? "" : "";
+
+    const dayKey = d ? `${d.user_id}__${d.date}` : "";
+    const arbeitstag =
+      dayKey && hasWorkedDay(d, it) && !workedDaySeen.has(dayKey) ? 1 : "";
+
+    if (arbeitstag === 1) {
+      workedDaySeen.add(dayKey);
+    }
+
+    return {
+      driver: excelValue(drvName),
+      ...makeRow({
+        Datum: excelValue(d?.date ?? ""),
+        Objekt: excelValue(it.objekt ?? ""),
+        Maschine: excelValue(it.maschine ?? ""),
+        "Fahrtzeit [min]": excelValue(it.fahrtzeit_min ?? ""),
+        MAS: excelValue(it.maschinenstunden_h ?? ""),
+        Unterhalt: excelValue(it.unterhalt_h ?? ""),
+        Reparatur: excelValue(it.reparatur_h ?? ""),
+        Motormanuel: excelValue(it.motormanuel_h ?? ""),
+        Umsetzen: excelValue(it.umsetzen_h ?? ""),
+        Sonstiges: excelValue(it.sonstiges_h ?? ""),
+        Beschreibung: excelValue(it.sonstiges_beschreibung ?? ""),
+        Arbeitstag: arbeitstag,
+        Urlaub: excelValue(d?.is_urlaub ?? false),
+        Wetter: excelValue(d?.is_wetter ?? false),
+        Twinch: excelValue(it.twinch_h ?? ""),
+        Beginn: excelValue(d?.arbeitsbeginn ?? ""),
+        Ende: excelValue(d?.arbeitsende ?? ""),
+        "MAS Start": excelValue(it.mas_start ?? ""),
+        "MAS Ende": excelValue(it.mas_end ?? ""),
+        Diesel: excelValue(it.diesel_l ?? ""),
+        Adblue: excelValue(it.adblue_l ?? ""),
+        Tageskommentar: excelValue(d?.kommentar ?? ""),
+        Einsatzkommentar: excelValue(it.kommentar ?? ""),
+      }),
+    };
+  });
+
+  const specialDayRows: Array<Record<string, any>> = hasItemFilter
+    ? []
+    : days
+        .filter((d) => (d.is_urlaub ?? false) || (d.is_wetter ?? false))
+        .map((d) => ({
+          driver: excelValue(driverMap.get(d.user_id) ?? ""),
+          ...makeRow({
+            Datum: excelValue(d.date),
+            Arbeitstag: "",
+            Urlaub: excelValue(d.is_urlaub ?? false),
+            Wetter: excelValue(d.is_wetter ?? false),
+            Beginn: excelValue(d.arbeitsbeginn ?? ""),
+            Ende: excelValue(d.arbeitsende ?? ""),
+            Tageskommentar: excelValue(d.kommentar ?? ""),
+          }),
+        }));
+
+  return itemRows.length === 0
+    ? hasItemFilter
+      ? []
+      : specialDayRows
+    : [...itemRows, ...specialDayRows];
+}
+
+function styleHeaderRow(worksheet: ExcelJS.Worksheet, columnCount: number) {
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 90;
+
+  for (let c = 1; c <= columnCount; c++) {
+    const cell = headerRow.getCell(c);
+    cell.font = { bold: true };
+    cell.alignment = {
+      vertical: "middle",
+      horizontal: "center",
+      textRotation: 90,
+      wrapText: true,
+    };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFD9E2F3" },
+    };
+    cell.border = {
+      top: { style: "thin", color: { argb: "FFBFBFBF" } },
+      left: { style: "thin", color: { argb: "FFBFBFBF" } },
+      bottom: { style: "thin", color: { argb: "FFBFBFBF" } },
+      right: { style: "thin", color: { argb: "FFBFBFBF" } },
+    };
+  }
+}
+
+function styleWeekendRow(row: ExcelJS.Row, columnCount: number) {
+  for (let c = 1; c <= columnCount; c++) {
+    const cell = row.getCell(c);
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFF2F2F2" },
+    };
+  }
+}
+
+function styleSumRow(row: ExcelJS.Row, columnCount: number) {
+  for (let c = 1; c <= columnCount; c++) {
+    const cell = row.getCell(c);
+    cell.font = { bold: true };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE2F0D9" },
+    };
+    cell.border = {
+      top: { style: "thin", color: { argb: "FF9E9E9E" } },
+      left: { style: "thin", color: { argb: "FF9E9E9E" } },
+      bottom: { style: "thin", color: { argb: "FF9E9E9E" } },
+      right: { style: "thin", color: { argb: "FF9E9E9E" } },
+    };
+  }
+}
+
+function setColumnWidths(worksheet: ExcelJS.Worksheet, headers: string[]) {
+  worksheet.columns = headers.map((h) => {
+    if (h === "Datum") return { key: h, width: 10 };
+    if (h === "Objekt") return { key: h, width: 24 };
+    if (h === "Maschine") return { key: h, width: 14 };
+
+    if (
+      [
+        "Fahrtzeit [min]",
+        "MAS",
+        "Unterhalt",
+        "Reparatur",
+        "Motormanuel",
+        "Umsetzen",
+        "Sonstiges",
+        "Twinch",
+        "Diesel",
+        "Adblue",
+        "MAS Start",
+        "MAS Ende",
+      ].includes(h)
+    ) {
+      return { key: h, width: 9 };
+    }
+
+    if (["Urlaub", "Wetter", "Arbeitstag"].includes(h)) {
+      return { key: h, width: 8 };
+    }
+
+    if (["Beginn", "Ende"].includes(h)) {
+      return { key: h, width: 9 };
+    }
+
+    if (h === "Beschreibung") return { key: h, width: 18 };
+    if (h === "Tageskommentar" || h === "Einsatzkommentar") return { key: h, width: 18 };
+
+    return { key: h, width: 16 };
+  });
+}
+
+async function downloadWorkbook(workbook: ExcelJS.Workbook, filename: string) {
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -157,6 +403,201 @@ function downloadText(filename: string, text: string) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function addSumRow(worksheet: ExcelJS.Worksheet) {
+  const rows = worksheet.rowCount;
+  if (rows < 2) return;
+
+  const sumLabels = new Set([
+    "Fahrtzeit [min]",
+    "MAS",
+    "Unterhalt",
+    "Reparatur",
+    "Motormanuel",
+    "Umsetzen",
+    "Sonstiges",
+    "Twinch",
+    "Diesel",
+    "Adblue",
+    "Arbeitstag",
+  ]);
+
+  const values: any[] = [];
+  values[1] = "SUMME";
+
+  for (let c = 2; c <= SHEET_HEADERS.length; c++) {
+    const header = String(worksheet.getRow(1).getCell(c).value || "");
+    if (sumLabels.has(header)) {
+      const colLetter = worksheet.getColumn(c).letter;
+      values[c] = { formula: `SUM(${colLetter}2:${colLetter}${rows})` };
+    } else {
+      values[c] = "";
+    }
+  }
+
+  const row = worksheet.addRow(values);
+  styleSumRow(row, SHEET_HEADERS.length);
+}
+
+async function exportToXLSX(filename: string, rows: Array<Record<string, any>>) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("Export");
+
+  const headers = ["driver", ...SHEET_HEADERS];
+
+  setColumnWidths(worksheet, headers);
+  worksheet.addRow(headers);
+  styleHeaderRow(worksheet, headers.length);
+
+  for (const r of rows) {
+    const row = worksheet.addRow(headers.map((h) => r?.[h] ?? ""));
+    const dateValue = String(r?.Datum ?? "");
+    if (dateValue && isWeekendISO(dateValue)) {
+      styleWeekendRow(row, headers.length);
+    }
+  }
+
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: headers.length },
+  };
+
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+
+  await downloadWorkbook(workbook, filename);
+}
+
+async function exportMonthlyDriverReportXLSX(
+  filename: string,
+  days: DayRow[],
+  items: ItemRow[],
+  drivers: DriverOption[],
+  from: string,
+  to: string
+) {
+  const workbook = new ExcelJS.Workbook();
+  const allDates = listDatesInRange(from, to);
+
+  const daysByDriverDate = new Map<string, DayRow>();
+  for (const d of days) {
+    daysByDriverDate.set(`${d.user_id}__${d.date}`, d);
+  }
+
+  const itemsByWorkday = new Map<string, ItemRow[]>();
+  for (const it of items) {
+    if (!itemsByWorkday.has(it.workday_id)) itemsByWorkday.set(it.workday_id, []);
+    itemsByWorkday.get(it.workday_id)!.push(it);
+  }
+
+  const sortedDrivers = [...drivers].sort(sortByLastnameLabel);
+
+  for (const drv of sortedDrivers) {
+    const worksheet = workbook.addWorksheet(
+      (drv.label || "Unbekannt").replace(/[\\\/\?\*\[\]\:]/g, "_").slice(0, 31) || "Unbekannt"
+    );
+
+    setColumnWidths(worksheet, [...SHEET_HEADERS]);
+    worksheet.addRow([...SHEET_HEADERS]);
+    styleHeaderRow(worksheet, SHEET_HEADERS.length);
+
+    const workedDaySeen = new Set<string>();
+
+    for (const date of allDates) {
+      const day = daysByDriverDate.get(`${drv.id}__${date}`);
+
+      if (!day) {
+        const rowData = makeRow({
+          Datum: date,
+        });
+
+        const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
+        if (isWeekendISO(date)) {
+          styleWeekendRow(row, SHEET_HEADERS.length);
+        }
+        continue;
+      }
+
+      const dayItems = itemsByWorkday.get(day.id) ?? [];
+
+      if (dayItems.length === 0) {
+        const rowData = makeRow({
+          Datum: date,
+          Arbeitstag: "",
+          Urlaub: excelValue(day.is_urlaub ?? false),
+          Wetter: excelValue(day.is_wetter ?? false),
+          Beginn: excelValue(day.arbeitsbeginn ?? ""),
+          Ende: excelValue(day.arbeitsende ?? ""),
+          Tageskommentar: excelValue(day.kommentar ?? ""),
+        });
+
+        const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
+        if (isWeekendISO(date)) {
+          styleWeekendRow(row, SHEET_HEADERS.length);
+        }
+        continue;
+      }
+
+      for (const it of dayItems) {
+        const dayKey = `${drv.id}__${date}`;
+        const arbeitstag =
+          hasWorkedDay(day, it) && !workedDaySeen.has(dayKey) ? 1 : "";
+
+        if (arbeitstag === 1) {
+          workedDaySeen.add(dayKey);
+        }
+
+        const rowData = makeRow({
+          Datum: date,
+          Objekt: excelValue(it.objekt ?? ""),
+          Maschine: excelValue(it.maschine ?? ""),
+          "Fahrtzeit [min]": excelValue(it.fahrtzeit_min ?? ""),
+          MAS: excelValue(it.maschinenstunden_h ?? ""),
+          Unterhalt: excelValue(it.unterhalt_h ?? ""),
+          Reparatur: excelValue(it.reparatur_h ?? ""),
+          Motormanuel: excelValue(it.motormanuel_h ?? ""),
+          Umsetzen: excelValue(it.umsetzen_h ?? ""),
+          Sonstiges: excelValue(it.sonstiges_h ?? ""),
+          Beschreibung: excelValue(it.sonstiges_beschreibung ?? ""),
+          Arbeitstag: arbeitstag,
+          Urlaub: excelValue(day.is_urlaub ?? false),
+          Wetter: excelValue(day.is_wetter ?? false),
+          Twinch: excelValue(it.twinch_h ?? ""),
+          Beginn: excelValue(day.arbeitsbeginn ?? ""),
+          Ende: excelValue(day.arbeitsende ?? ""),
+          "MAS Start": excelValue(it.mas_start ?? ""),
+          "MAS Ende": excelValue(it.mas_end ?? ""),
+          Diesel: excelValue(it.diesel_l ?? ""),
+          Adblue: excelValue(it.adblue_l ?? ""),
+          Tageskommentar: excelValue(day.kommentar ?? ""),
+          Einsatzkommentar: excelValue(it.kommentar ?? ""),
+        });
+
+        const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
+        if (isWeekendISO(date)) {
+          styleWeekendRow(row, SHEET_HEADERS.length);
+        }
+      }
+    }
+
+    addSumRow(worksheet);
+
+    worksheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: SHEET_HEADERS.length },
+    };
+
+    worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  }
+
+  if (sortedDrivers.length === 0) {
+    const worksheet = workbook.addWorksheet("Monatsbericht");
+    setColumnWidths(worksheet, [...SHEET_HEADERS]);
+    worksheet.addRow([...SHEET_HEADERS]);
+    styleHeaderRow(worksheet, SHEET_HEADERS.length);
+  }
+
+  await downloadWorkbook(workbook, filename);
 }
 
 async function isAdmin() {
@@ -176,9 +617,8 @@ export default function AdminExportPage() {
 
   const [machines, setMachines] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
-  const [drivers, setDrivers] = useState<Array<{ id: string; label: string }>>([]);
+  const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
-  // Mapping für driver Feld (user_id -> Name)
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
   const [selectedMachine, setSelectedMachine] = useState("");
@@ -189,17 +629,24 @@ export default function AdminExportPage() {
   const [loading, setLoading] = useState(false);
 
   const needsRange = useMemo(
-    () => mode === "machine_range" || mode === "driver_range" || mode === "all_range",
+    () =>
+      mode === "machine_range" ||
+      mode === "driver_range" ||
+      mode === "all_range" ||
+      mode === "monthly_driver_tables",
     [mode]
   );
+
   const needsMachine = useMemo(
     () => mode === "machine_range" || mode === "machine_object",
     [mode]
   );
+
   const needsDriver = useMemo(
     () => mode === "driver_range" || mode === "driver_object",
     [mode]
   );
+
   const needsObject = useMemo(
     () => mode === "machine_object" || mode === "driver_object" || mode === "all_object",
     [mode]
@@ -226,7 +673,7 @@ export default function AdminExportPage() {
       label: x.full_name?.trim() || x.username?.trim() || x.user_id,
     }));
 
-    setDrivers(drv);
+    setDrivers([...drv].sort(sortByLastnameLabel));
 
     const map = new Map<string, string>();
     for (const x of drvRows) {
@@ -261,15 +708,26 @@ export default function AdminExportPage() {
       return;
     }
 
-    if (needsRange && (!from || !to)) return setMsg("Bitte Zeitraum (von/bis) setzen.");
-    if (needsMachine && !selectedMachine) return setMsg("Bitte Maschine wählen.");
-    if (needsDriver && !selectedDriver) return setMsg("Bitte Fahrer wählen.");
-    if (needsObject && !selectedObject) return setMsg("Bitte Objekt wählen.");
+    if (needsRange && (!from || !to)) {
+      setMsg("Bitte Zeitraum (von/bis) setzen.");
+      return;
+    }
+    if (needsMachine && !selectedMachine) {
+      setMsg("Bitte Maschine wählen.");
+      return;
+    }
+    if (needsDriver && !selectedDriver) {
+      setMsg("Bitte Fahrer wählen.");
+      return;
+    }
+    if (needsObject && !selectedObject) {
+      setMsg("Bitte Objekt wählen.");
+      return;
+    }
 
     setLoading(true);
     setMsg("Export wird geladen...");
 
-    // 1) Workdays (gefiltert)
     let q = supabase
       .from("workdays")
       .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter")
@@ -279,6 +737,7 @@ export default function AdminExportPage() {
     if (needsDriver) q = q.eq("user_id", selectedDriver);
 
     const { data: dayData, error: dayErr } = await q;
+
     if (dayErr) {
       setLoading(false);
       setMsg("Fehler Workdays: " + dayErr.message);
@@ -288,117 +747,54 @@ export default function AdminExportPage() {
     const days: DayRow[] = ((dayData as any[]) ?? []) as DayRow[];
     const dayIds = days.map((d) => d.id);
 
-    if (dayIds.length === 0) {
-      const filename = sanitizeFilename(`export_${mode}__leer.csv`);
-      downloadText(filename, toCSV([]));
-      setLoading(false);
-      setMsg("✅ Keine Daten im Filter. Leere CSV exportiert.");
-      return;
+    let items: ItemRow[] = [];
+
+    if (dayIds.length > 0) {
+      const { data: itemData, error: itemErr } = await supabase
+        .from("work_items")
+        .select(
+          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
+        )
+        .in("workday_id", dayIds);
+
+      if (itemErr) {
+        setLoading(false);
+        setMsg("Fehler Work Items: " + itemErr.message);
+        return;
+      }
+
+      items = ((itemData as any[]) ?? []) as ItemRow[];
     }
 
-    // 2) Items holen (für diese Workdays)
-    const { data: itemData, error: itemErr } = await supabase
-      .from("work_items")
-      .select(
-        "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
-      )
-      .in("workday_id", dayIds);
-
-    if (itemErr) {
-      setLoading(false);
-      setMsg("Fehler Work Items: " + itemErr.message);
-      return;
-    }
-
-    let items: ItemRow[] = ((itemData as any[]) ?? []) as ItemRow[];
-
-    // 3) Filter auf Maschine/Objekt (wenn nötig)
     if (needsMachine) {
       const m = selectedMachine.trim();
       items = items.filter((it) => (it.maschine ?? "").trim() === m);
     }
+
     if (needsObject) {
       const o = selectedObject.trim();
       items = items.filter((it) => (it.objekt ?? "").trim() === o);
     }
 
-    // 4) Join day + item
-    const dayMap = new Map<string, DayRow>(days.map((d) => [d.id, d]));
+    if (mode === "monthly_driver_tables") {
+      const filename = sanitizeFilename(`Monatsbericht_Fahrer_${from}_bis_${to}.xlsx`);
+      await exportMonthlyDriverReportXLSX(filename, days, items, drivers, from, to);
 
-    const itemRows: Array<Record<string, any>> = items.map((it) => {
-      const d = dayMap.get(it.workday_id);
-      const drvName = d?.user_id ? (driverMap.get(d.user_id) ?? "") : "";
+      setLoading(false);
+      setMsg("✅ Monatsbericht exportiert.");
+      return;
+    }
 
-      return {
-        date: d?.date ?? "",
-        objekt: it.objekt ?? "",
-        driver: drvName,
-        maschine: it.maschine ?? "",
+    if (dayIds.length === 0) {
+      const filename = sanitizeFilename(`export_${mode}__leer.xlsx`);
+      await exportToXLSX(filename, []);
+      setLoading(false);
+      setMsg("✅ Keine Daten im Filter. Leere XLSX exportiert.");
+      return;
+    }
 
-        is_urlaub: d?.is_urlaub ?? false,
-        is_wetter: d?.is_wetter ?? false,
-        arbeitsbeginn: d?.arbeitsbeginn ?? "",
-        arbeitsende: d?.arbeitsende ?? "",
-        tages_kommentar: d?.kommentar ?? "",
-
-        fahrtzeit_min: it.fahrtzeit_min ?? "",
-        mas_start: it.mas_start ?? "",
-        mas_end: it.mas_end ?? "",
-        maschinenstunden_h: it.maschinenstunden_h ?? "",
-
-        unterhalt_h: it.unterhalt_h ?? "",
-        reparatur_h: it.reparatur_h ?? "",
-        motormanuel_h: it.motormanuel_h ?? "",
-        umsetzen_h: it.umsetzen_h ?? "",
-        sonstiges_h: it.sonstiges_h ?? "",
-        sonstiges_beschreibung: it.sonstiges_beschreibung ?? "",
-
-        diesel_l: it.diesel_l ?? "",
-        adblue_l: it.adblue_l ?? "",
-
-        einsatz_kommentar: it.kommentar ?? "",
-        twinch_used: it.twinch_used ?? false,
-        twinch_h: it.twinch_h ?? "",
-      };
-    });
-
-    // 5) Special-Days (Urlaub/Wetter) nur exportieren, wenn KEIN item-filter aktiv ist
     const hasItemFilter = needsMachine || needsObject;
-    const specialDayRows: Array<Record<string, any>> = hasItemFilter
-      ? []
-      : days
-          .filter((d) => (d.is_urlaub ?? false) || (d.is_wetter ?? false))
-          .map((d) => ({
-            date: d.date,
-            objekt: "",
-            driver: driverMap.get(d.user_id) ?? "",
-            maschine: "",
-
-            is_urlaub: d.is_urlaub ?? false,
-            is_wetter: d.is_wetter ?? false,
-            arbeitsbeginn: d.arbeitsbeginn ?? "",
-            arbeitsende: d.arbeitsende ?? "",
-            tages_kommentar: d.kommentar ?? "",
-
-            fahrtzeit_min: "",
-            mas_start: "",
-            mas_end: "",
-            maschinenstunden_h: "",
-            unterhalt_h: "",
-            reparatur_h: "",
-            motormanuel_h: "",
-            umsetzen_h: "",
-            sonstiges_h: "",
-            sonstiges_beschreibung: "",
-            diesel_l: "",
-            adblue_l: "",
-            einsatz_kommentar: "",
-            twinch_used: "",
-            twinch_h: "",
-          }));
-
-    const finalRows =
-      itemRows.length === 0 ? (hasItemFilter ? [] : specialDayRows) : [...itemRows, ...specialDayRows];
+    const finalRows = buildExportRows(days, items, driverMap, hasItemFilter);
 
     const labelParts: string[] = [mode];
     if (needsRange) labelParts.push(`${from}_bis_${to}`);
@@ -409,11 +805,15 @@ export default function AdminExportPage() {
     }
     if (needsObject) labelParts.push(`objekt_${selectedObject}`);
 
-    const filename = sanitizeFilename(`export_${labelParts.join("__")}.csv`);
+    const filename = sanitizeFilename(`export_${labelParts.join("__")}.xlsx`);
+    await exportToXLSX(filename, finalRows);
 
-    downloadText(filename, toCSV(finalRows));
     setLoading(false);
-    setMsg(finalRows.length === 0 ? "✅ Keine Daten im Filter. Leere CSV exportiert." : `✅ Export fertig: ${finalRows.length} Zeilen`);
+    setMsg(
+      finalRows.length === 0
+        ? "✅ Keine Daten im Filter. Leere XLSX exportiert."
+        : `✅ Export fertig: ${finalRows.length} Zeilen`
+    );
   }
 
   if (admin === null) {
@@ -478,6 +878,7 @@ export default function AdminExportPage() {
             <option value="driver_object">Pro Fahrer · Objekt</option>
             <option value="all_range">Alles · Zeitraum</option>
             <option value="all_object">Alles · Objekt</option>
+            <option value="monthly_driver_tables">Monatsbericht · Fahrer-Tabellen</option>
           </select>
         </label>
 
@@ -539,14 +940,10 @@ export default function AdminExportPage() {
         )}
 
         <button onClick={runExport} disabled={loading} className="btnPrimary" style={{ marginTop: 14 }}>
-          {loading ? "Lade..." : "CSV exportieren"}
+          {loading ? "Lade..." : "XLSX exportieren"}
         </button>
 
         {msg && <p className="msg">{msg}</p>}
-
-        <div className="hint" style={{ marginTop: 12 }}>
-          Hinweis: Fahrer kommen aus <b>driver_profiles</b> (driver = full_name/username anhand workdays.user_id).
-        </div>
       </section>
 
       <style jsx>{baseStyles}</style>
@@ -576,7 +973,6 @@ const baseStyles = `
 .btn{padding:10px 12px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:800}
 .btnPrimary{padding:12px 14px;border-radius:12px;border:1px solid #ddd;background:#fff;font-weight:900}
 .msg{margin-top:10px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:12px;padding:10px}
-.hint{padding:10px 12px;border:1px dashed #ddd;border-radius:12px;background:#fafafa;font-weight:700}
 @media(max-width:700px){
   .row2{grid-template-columns:1fr}
   .head{flex-direction:column;align-items:stretch}
