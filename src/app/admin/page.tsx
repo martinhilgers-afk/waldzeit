@@ -10,6 +10,7 @@ type Row = {
   name: string;
   is_active: boolean;
   created_at: string;
+  hourly_rate?: number | null;
 };
 
 type DriverRow = {
@@ -17,6 +18,7 @@ type DriverRow = {
   username: string | null;
   full_name: string;
   default_machine: string | null;
+  hourly_wage: number | null;
   is_active: boolean;
   created_at: string;
 };
@@ -31,6 +33,13 @@ function normName(v: string) {
   return v.trim().replace(/\s+/g, " ");
 }
 
+function toNumOrNull(v: string) {
+  const t = v.trim();
+  if (!t) return null;
+  const n = Number(t.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
 export default function AdminPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
@@ -41,12 +50,13 @@ export default function AdminPage() {
 
   const [newObject, setNewObject] = useState("");
   const [newMachine, setNewMachine] = useState("");
+  const [newMachineHourlyRate, setNewMachineHourlyRate] = useState("");
 
-  // Fahrer: Neues Profil
   const [newDriverUserId, setNewDriverUserId] = useState("");
   const [newDriverUsername, setNewDriverUsername] = useState("");
   const [newDriverFullName, setNewDriverFullName] = useState("");
   const [newDriverDefaultMachine, setNewDriverDefaultMachine] = useState("");
+  const [newDriverHourlyWage, setNewDriverHourlyWage] = useState("");
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -63,9 +73,7 @@ export default function AdminPage() {
       const ok = await isAdmin();
       setAdmin(ok);
 
-      if (ok) {
-        await loadAll();
-      }
+      if (ok) await loadAll();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -79,7 +87,7 @@ export default function AdminPage() {
       supabase.from("machines").select("*").order("is_active", { ascending: false }).order("name", { ascending: true }),
       supabase
         .from("driver_profiles")
-        .select("user_id,username,full_name,default_machine,is_active,created_at")
+        .select("user_id,username,full_name,default_machine,hourly_wage,is_active,created_at")
         .order("is_active", { ascending: false })
         .order("full_name", { ascending: true }),
     ]);
@@ -92,7 +100,35 @@ export default function AdminPage() {
 
     setObjects((o.data as any) ?? []);
     setMachines((m.data as any) ?? []);
-    setDrivers((d.data as any) ?? []);
+const driverData = ((d.data as any) ?? []) as DriverRow[];
+
+driverData.sort((a, b) => {
+  const getLastName = (name: string) => {
+    const parts = String(name || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+    return parts.length === 0
+      ? ""
+      : parts[parts.length - 1].toLowerCase();
+  };
+
+  const lastA = getLastName(a.full_name);
+  const lastB = getLastName(b.full_name);
+
+  const cmp = lastA.localeCompare(lastB, "de", {
+    sensitivity: "base",
+  });
+
+  if (cmp !== 0) return cmp;
+
+  return a.full_name.localeCompare(b.full_name, "de", {
+    sensitivity: "base",
+  });
+});
+
+setDrivers(driverData);
   }
 
   async function add(kind: "objects" | "machines") {
@@ -103,7 +139,10 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase.from(kind).insert({ name });
+    const payload: any = { name };
+    if (kind === "machines") payload.hourly_rate = toNumOrNull(newMachineHourlyRate);
+
+    const { error } = await supabase.from(kind).insert(payload);
 
     setBusy(false);
     if (error) {
@@ -111,8 +150,12 @@ export default function AdminPage() {
       return;
     }
 
-    if (kind === "objects") setNewObject("");
-    else setNewMachine("");
+    if (kind === "objects") {
+      setNewObject("");
+    } else {
+      setNewMachine("");
+      setNewMachineHourlyRate("");
+    }
 
     setMsg("✅ Gespeichert");
     await loadAll();
@@ -171,15 +214,32 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  // =========================
-  // Fahrer CRUD
-  // =========================
+  async function setMachineHourlyRate(row: Row) {
+    const current = row.hourly_rate ?? "";
+    const raw = prompt("Stundenpreis Maschine:", String(current).replace(".", ",")) || "";
+    const next = toNumOrNull(raw);
+
+    setMsg("Speichern...");
+    setBusy(true);
+
+    const { error } = await supabase.from("machines").update({ hourly_rate: next }).eq("id", row.id);
+
+    setBusy(false);
+    if (error) {
+      setMsg("Fehler: " + error.message);
+      return;
+    }
+
+    setMsg("✅ Stundenpreis gespeichert");
+    await loadAll();
+  }
 
   async function addDriver() {
     const user_id = normName(newDriverUserId);
     const full_name = normName(newDriverFullName);
     const username = normName(newDriverUsername);
     const default_machine = normName(newDriverDefaultMachine);
+    const hourly_wage = toNumOrNull(newDriverHourlyWage);
 
     if (!user_id) return setMsg("Bitte user_id (UUID) eingeben.");
     if (!full_name) return setMsg("Bitte Name eingeben.");
@@ -192,6 +252,7 @@ export default function AdminPage() {
       full_name,
       username: username || null,
       default_machine: default_machine || null,
+      hourly_wage,
       is_active: true,
     };
 
@@ -207,6 +268,7 @@ export default function AdminPage() {
     setNewDriverFullName("");
     setNewDriverUsername("");
     setNewDriverDefaultMachine("");
+    setNewDriverHourlyWage("");
 
     setMsg("✅ Fahrer gespeichert");
     await loadAll();
@@ -252,7 +314,7 @@ export default function AdminPage() {
 
   async function setDriverUsername(row: DriverRow) {
     const next = normName(prompt("Neuer Benutzername (optional):", row.username ?? "") || "");
-    // darf leer sein => null
+
     setMsg("Speichern...");
     setBusy(true);
 
@@ -290,13 +352,31 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function removeDriver(row: DriverRow) {
-    if (
-      !confirm(
-        `Wirklich Fahrer-Profil löschen?\n\n${row.full_name}\n\nHinweis: Das löscht NICHT automatisch den Auth-User.`
-      )
-    )
+  async function setDriverHourlyWage(row: DriverRow) {
+    const current = row.hourly_wage ?? "";
+    const raw = prompt("Stundenlohn Fahrer:", String(current).replace(".", ",")) || "";
+    const next = toNumOrNull(raw);
+
+    setMsg("Speichern...");
+    setBusy(true);
+
+    const { error } = await supabase
+      .from("driver_profiles")
+      .update({ hourly_wage: next })
+      .eq("user_id", row.user_id);
+
+    setBusy(false);
+    if (error) {
+      setMsg("Fehler: " + error.message);
       return;
+    }
+
+    setMsg("✅ Stundenlohn gespeichert");
+    await loadAll();
+  }
+
+  async function removeDriver(row: DriverRow) {
+    if (!confirm(`Wirklich Fahrer-Profil löschen?\n\n${row.full_name}\n\nHinweis: Das löscht NICHT automatisch den Auth-User.`)) return;
 
     setMsg("Löschen...");
     setBusy(true);
@@ -342,9 +422,6 @@ export default function AdminPage() {
         </header>
 
         <p style={{ marginTop: 16, color: "crimson" }}>❌ Du bist kein Admin.</p>
-        <p style={{ opacity: 0.8 }}>
-          Admin-Rechte werden über <code>admin_users</code> + <code>public.is_admin()</code> gesteuert.
-        </p>
       </main>
     );
   }
@@ -359,386 +436,402 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Link href="/admin/export">
-            <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Export</button>
-          </Link>
+<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+  <Link href="/admin/control">
+    <button className="topBtn">Kontrolle</button>
+  </Link>
 
-          <Link href="/app">
-            <button style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}>Zur Übersicht</button>
-          </Link>
+  <Link href="/admin/export">
+    <button className="topBtn">Export</button>
+  </Link>
 
-          <button
-            onClick={loadAll}
-            disabled={busy}
-            style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-          >
-            {busy ? "…" : "Neu laden"}
-          </button>
-        </div>
+  <Link href="/app">
+    <button className="topBtn">Zur Übersicht</button>
+  </Link>
+
+  <button onClick={loadAll} disabled={busy} className="topBtn">
+    {busy ? "…" : "Neu laden"}
+  </button>
+</div>
       </header>
 
       <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
-        {/* FAHRER */}
-        <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
-          <h2 style={{ marginTop: 0 }}>Fahrer</h2>
+        {/* OBJEKTE */}
+        <details className="adminSection" open>
+          <summary className="sectionSummary">
+            <span className="plus">＋</span>
+            <span>Objekte</span>
+            <span className="count">Aktiv: {activeObjects.length} / Gesamt: {objects.length}</span>
+          </summary>
 
-          <div style={{ opacity: 0.75, marginBottom: 10 }}>
-            Aktiv: {activeDrivers.length} / Gesamt: {drivers.length}{" "}
-            <span style={{ opacity: 0.75 }}>
-              (user_id bekommst du im Supabase Dashboard unter Auth → Users)
-            </span>
-          </div>
-
-          <div style={{ display: "grid", gap: 10 }}>
-            <input
-              value={newDriverUserId}
-              onChange={(e) => setNewDriverUserId(e.target.value)}
-              placeholder="user_id (UUID) aus Auth Users"
-              style={{ padding: 12, fontSize: 16, borderRadius: 10, border: "1px solid #ddd" }}
-            />
-
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="sectionInner">
+            <div className="inputRow">
               <input
-                value={newDriverFullName}
-                onChange={(e) => setNewDriverFullName(e.target.value)}
-                placeholder="Name (Pflicht), z.B. Max Mustermann"
-                style={{ flex: "1 1 320px", padding: 12, fontSize: 16, borderRadius: 10, border: "1px solid #ddd" }}
+                value={newObject}
+                onChange={(e) => setNewObject(e.target.value)}
+                placeholder="Neues Objekt, z.B. Holzpolter 17"
+                className="input"
               />
-
-              <input
-                value={newDriverUsername}
-                onChange={(e) => setNewDriverUsername(e.target.value)}
-                placeholder="Benutzername (optional)"
-                style={{ flex: "1 1 220px", padding: 12, fontSize: 16, borderRadius: 10, border: "1px solid #ddd" }}
-              />
-            </div>
-
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <select
-                value={newDriverDefaultMachine}
-                onChange={(e) => setNewDriverDefaultMachine(e.target.value)}
-                style={{
-                  flex: "1 1 360px",
-                  padding: 12,
-                  fontSize: 16,
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  background: "#fff",
-                }}
-              >
-                <option value="">Standard-Maschine (optional) …</option>
-                {machines.map((m) => (
-                  <option key={m.id} value={m.name}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-
-              <button
-                type="button"
-                onClick={addDriver}
-                disabled={busy}
-                style={{
-                  padding: "12px 14px",
-                  borderRadius: 12,
-                  border: "1px solid #ddd",
-                  fontWeight: 900,
-                  minWidth: 160,
-                }}
-              >
-                Fahrer hinzufügen
+              <button type="button" onClick={() => add("objects")} disabled={busy} className="primaryBtn">
+                Hinzufügen
               </button>
             </div>
-          </div>
 
-          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
-            {drivers.map((d) => (
-              <div
-                key={d.user_id}
-                style={{
-                  border: "1px solid #eee",
-                  borderRadius: 12,
-                  padding: 10,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ minWidth: 260 }}>
-                  <b>{d.full_name}</b>{" "}
-                  {!d.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
-                  <div style={{ opacity: 0.8, marginTop: 4, fontSize: 13 }}>
-                    user_id: <code>{d.user_id}</code>
-                    {d.username ? (
-                      <>
-                        {" "}
-                        · username: <b>{d.username}</b>
-                      </>
-                    ) : (
-                      <>
-                        {" "}
-                        · username: <span style={{ opacity: 0.7 }}>(leer)</span>
-                      </>
-                    )}
-                    {" · "}
-                    Standard-Maschine:{" "}
-                    <b>{d.default_machine ? d.default_machine : <span style={{ opacity: 0.7 }}>(keine)</span>}</b>
+            <div className="list">
+              {objects.map((o) => (
+                <div key={o.id} className="listRow">
+                  <div style={{ minWidth: 220 }}>
+                    <b>{o.name}</b> {!o.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                  </div>
+
+                  <div className="actions">
+                    <button type="button" onClick={() => toggleActive("objects", o)} disabled={busy} className="smallBtn">
+                      {o.is_active ? "Deaktivieren" : "Aktivieren"}
+                    </button>
+                    <button type="button" onClick={() => rename("objects", o)} disabled={busy} className="smallBtn">
+                      Umbenennen
+                    </button>
+                    <button type="button" onClick={() => remove("objects", o)} disabled={busy} className="smallBtn">
+                      Löschen
+                    </button>
                   </div>
                 </div>
+              ))}
 
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <select
-                    value={d.default_machine ?? ""}
-                    onChange={(e) => setDriverDefaultMachine(d, e.target.value)}
-                    disabled={busy}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: "1px solid #ddd",
-                      background: "#fff",
-                      minWidth: 220,
-                    }}
-                  >
-                    <option value="">Standard-Maschine…</option>
-                    {machines
-                      .filter((x) => x.is_active)
-                      .map((m) => (
-                        <option key={m.id} value={m.name}>
-                          {m.name}
-                        </option>
-                      ))}
-                  </select>
+              {objects.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Objekte angelegt.</div>}
+            </div>
+          </div>
+        </details>
 
-                  <button
-                    type="button"
-                    onClick={() => toggleDriverActive(d)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    {d.is_active ? "Deaktivieren" : "Aktivieren"}
-                  </button>
+        {/* FAHRER */}
+        <details className="adminSection">
+          <summary className="sectionSummary">
+            <span className="plus">＋</span>
+            <span>Fahrer</span>
+            <span className="count">Aktiv: {activeDrivers.length} / Gesamt: {drivers.length}</span>
+          </summary>
 
-                  <button
-                    type="button"
-                    onClick={() => renameDriver(d)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Umbenennen
-                  </button>
+          <div className="sectionInner">
+            <div style={{ opacity: 0.75, marginBottom: 10 }}>
+              user_id bekommst du im Supabase Dashboard unter Auth → Users.
+            </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setDriverUsername(d)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Username
-                  </button>
+            <div style={{ display: "grid", gap: 10 }}>
+              <input
+                value={newDriverUserId}
+                onChange={(e) => setNewDriverUserId(e.target.value)}
+                placeholder="user_id (UUID) aus Auth Users"
+                className="input"
+              />
 
-                  <button
-                    type="button"
-                    onClick={() => removeDriver(d)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Löschen
-                  </button>
-                </div>
+              <div className="inputRow">
+                <input
+                  value={newDriverFullName}
+                  onChange={(e) => setNewDriverFullName(e.target.value)}
+                  placeholder="Name (Pflicht), z.B. Max Mustermann"
+                  className="input"
+                />
+
+                <input
+                  value={newDriverUsername}
+                  onChange={(e) => setNewDriverUsername(e.target.value)}
+                  placeholder="Benutzername (optional)"
+                  className="input"
+                />
               </div>
-            ))}
 
-            {drivers.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Fahrer angelegt.</div>}
-          </div>
-        </section>
+              <div className="inputRow">
+                <select
+                  value={newDriverDefaultMachine}
+                  onChange={(e) => setNewDriverDefaultMachine(e.target.value)}
+                  className="input"
+                >
+                  <option value="">Standard-Maschine (optional) …</option>
+                  {machines.map((m) => (
+                    <option key={m.id} value={m.name}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
 
-        {/* OBJEKTE */}
-        <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
-          <h2 style={{ marginTop: 0 }}>Objekte</h2>
+                <input
+                  value={newDriverHourlyWage}
+                  onChange={(e) => setNewDriverHourlyWage(e.target.value)}
+                  placeholder="Stundenlohn, z.B. 19,5"
+                  inputMode="decimal"
+                  className="input"
+                />
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <input
-              value={newObject}
-              onChange={(e) => setNewObject(e.target.value)}
-              placeholder="Neues Objekt, z.B. Holzpolter 17"
-              style={{
-                flex: "1 1 360px",
-                padding: 12,
-                fontSize: 16,
-                borderRadius: 10,
-                border: "1px solid #ddd",
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => add("objects")}
-              disabled={busy}
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "1px solid #ddd",
-                fontWeight: 900,
-                minWidth: 140,
-              }}
-            >
-              Hinzufügen
-            </button>
-          </div>
-
-          <div style={{ opacity: 0.75, marginTop: 10 }}>
-            Aktiv: {activeObjects.length} / Gesamt: {objects.length}
-          </div>
-
-          <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-            {objects.map((o) => (
-              <div
-                key={o.id}
-                style={{
-                  border: "1px solid #eee",
-                  borderRadius: 12,
-                  padding: 10,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ minWidth: 200 }}>
-                  <b>{o.name}</b> {!o.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
-                </div>
-
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    onClick={() => toggleActive("objects", o)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    {o.is_active ? "Deaktivieren" : "Aktivieren"}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => rename("objects", o)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Umbenennen
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => remove("objects", o)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Löschen
-                  </button>
-                </div>
+                <button type="button" onClick={addDriver} disabled={busy} className="primaryBtn">
+                  Fahrer hinzufügen
+                </button>
               </div>
-            ))}
+            </div>
 
-            {objects.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Objekte angelegt.</div>}
+            <div className="list" style={{ marginTop: 12 }}>
+              {drivers.map((d) => (
+                <div key={d.user_id} className="listRow">
+                  <div style={{ minWidth: 280 }}>
+                    <b>{d.full_name}</b> {!d.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                    <div style={{ opacity: 0.8, marginTop: 4, fontSize: 13 }}>
+                      user_id: <code>{d.user_id}</code>
+                      {" · "}username: <b>{d.username || <span style={{ opacity: 0.7 }}>(leer)</span>}</b>
+                      {" · "}Standard-Maschine: <b>{d.default_machine || <span style={{ opacity: 0.7 }}>(keine)</span>}</b>
+                      {" · "}Stundenlohn: <b>{d.hourly_wage ?? <span style={{ opacity: 0.7 }}>(leer)</span>} €/h</b>
+                    </div>
+                  </div>
+
+                  <div className="actions">
+                    <select
+                      value={d.default_machine ?? ""}
+                      onChange={(e) => setDriverDefaultMachine(d, e.target.value)}
+                      disabled={busy}
+                      className="smallSelect"
+                    >
+                      <option value="">Standard-Maschine…</option>
+                      {machines
+                        .filter((x) => x.is_active)
+                        .map((m) => (
+                          <option key={m.id} value={m.name}>
+                            {m.name}
+                          </option>
+                        ))}
+                    </select>
+
+                    <button type="button" onClick={() => setDriverHourlyWage(d)} disabled={busy} className="smallBtn">
+                      Lohn
+                    </button>
+
+                    <button type="button" onClick={() => toggleDriverActive(d)} disabled={busy} className="smallBtn">
+                      {d.is_active ? "Deaktivieren" : "Aktivieren"}
+                    </button>
+
+                    <button type="button" onClick={() => renameDriver(d)} disabled={busy} className="smallBtn">
+                      Umbenennen
+                    </button>
+
+                    <button type="button" onClick={() => setDriverUsername(d)} disabled={busy} className="smallBtn">
+                      Username
+                    </button>
+
+                    <button type="button" onClick={() => removeDriver(d)} disabled={busy} className="smallBtn">
+                      Löschen
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              {drivers.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Fahrer angelegt.</div>}
+            </div>
           </div>
-        </section>
+        </details>
 
         {/* MASCHINEN */}
-        <section style={{ border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
-          <h2 style={{ marginTop: 0 }}>Maschinen</h2>
+        <details className="adminSection">
+          <summary className="sectionSummary">
+            <span className="plus">＋</span>
+            <span>Maschinen</span>
+            <span className="count">Aktiv: {activeMachines.length} / Gesamt: {machines.length}</span>
+          </summary>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <input
-              value={newMachine}
-              onChange={(e) => setNewMachine(e.target.value)}
-              placeholder="Neue Maschine, z.B. Harvester H1"
-              style={{
-                flex: "1 1 360px",
-                padding: 12,
-                fontSize: 16,
-                borderRadius: 10,
-                border: "1px solid #ddd",
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => add("machines")}
-              disabled={busy}
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                border: "1px solid #ddd",
-                fontWeight: 900,
-                minWidth: 140,
-              }}
-            >
-              Hinzufügen
-            </button>
-          </div>
+          <div className="sectionInner">
+            <div className="inputRow">
+              <input
+                value={newMachine}
+                onChange={(e) => setNewMachine(e.target.value)}
+                placeholder="Neue Maschine, z.B. Harvester H1"
+                className="input"
+              />
 
-          <div style={{ opacity: 0.75, marginTop: 10 }}>
-            Aktiv: {activeMachines.length} / Gesamt: {machines.length}
-          </div>
+              <input
+                value={newMachineHourlyRate}
+                onChange={(e) => setNewMachineHourlyRate(e.target.value)}
+                placeholder="Stundenpreis, z.B. 95"
+                inputMode="decimal"
+                className="input"
+              />
 
-          <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-            {machines.map((m) => (
-              <div
-                key={m.id}
-                style={{
-                  border: "1px solid #eee",
-                  borderRadius: 12,
-                  padding: 10,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                <div style={{ minWidth: 200 }}>
-                  <b>{m.name}</b> {!m.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+              <button type="button" onClick={() => add("machines")} disabled={busy} className="primaryBtn">
+                Hinzufügen
+              </button>
+            </div>
+
+            <div className="list">
+              {machines.map((m) => (
+                <div key={m.id} className="listRow">
+                  <div style={{ minWidth: 240 }}>
+                    <b>{m.name}</b> {!m.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                    <div style={{ opacity: 0.8, marginTop: 4, fontSize: 13 }}>
+                      Stundenpreis: <b>{m.hourly_rate ?? <span style={{ opacity: 0.7 }}>(leer)</span>} €/h</b>
+                    </div>
+                  </div>
+
+                  <div className="actions">
+                    <button type="button" onClick={() => setMachineHourlyRate(m)} disabled={busy} className="smallBtn">
+                      Preis
+                    </button>
+
+                    <button type="button" onClick={() => toggleActive("machines", m)} disabled={busy} className="smallBtn">
+                      {m.is_active ? "Deaktivieren" : "Aktivieren"}
+                    </button>
+
+                    <button type="button" onClick={() => rename("machines", m)} disabled={busy} className="smallBtn">
+                      Umbenennen
+                    </button>
+
+                    <button type="button" onClick={() => remove("machines", m)} disabled={busy} className="smallBtn">
+                      Löschen
+                    </button>
+                  </div>
                 </div>
+              ))}
 
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    onClick={() => toggleActive("machines", m)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    {m.is_active ? "Deaktivieren" : "Aktivieren"}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => rename("machines", m)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Umbenennen
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => remove("machines", m)}
-                    disabled={busy}
-                    style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  >
-                    Löschen
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            {machines.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Maschinen angelegt.</div>}
+              {machines.length === 0 && <div style={{ opacity: 0.7 }}>Noch keine Maschinen angelegt.</div>}
+            </div>
           </div>
-        </section>
+        </details>
 
         {msg && <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{msg}</pre>}
       </div>
+
+      <style jsx>{`
+        .topBtn,
+        .smallBtn,
+        .primaryBtn {
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 800;
+          cursor: pointer;
+        }
+
+        .topBtn {
+          padding: 10px;
+          border-radius: 10px;
+        }
+
+        .primaryBtn {
+          padding: 12px 14px;
+          border-radius: 12px;
+          font-weight: 900;
+          min-width: 140px;
+        }
+
+        .smallBtn {
+          padding: 8px 10px;
+          border-radius: 10px;
+        }
+
+        .adminSection {
+          border: 1px solid #eee;
+          border-radius: 14px;
+          padding: 12px;
+          background: #fff;
+        }
+
+        .sectionSummary {
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 22px;
+          font-weight: 900;
+          list-style: none;
+          user-select: none;
+        }
+
+        .sectionSummary::-webkit-details-marker {
+          display: none;
+        }
+
+        .plus {
+          display: inline-block;
+          transition: transform 0.12s ease;
+          font-size: 22px;
+        }
+
+        details[open] .plus {
+          transform: rotate(45deg);
+        }
+
+        .count {
+          margin-left: auto;
+          font-size: 14px;
+          opacity: 0.7;
+          font-weight: 800;
+        }
+
+        .sectionInner {
+          margin-top: 12px;
+        }
+
+        .inputRow {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .input {
+          flex: 1 1 260px;
+          padding: 12px;
+          font-size: 16px;
+          border-radius: 10px;
+          border: 1px solid #ddd;
+          background: #fff;
+          box-sizing: border-box;
+        }
+
+        .smallSelect {
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid #ddd;
+          background: #fff;
+          min-width: 220px;
+        }
+
+        .list {
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .listRow {
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 10px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .actions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+
+        @media (max-width: 700px) {
+          .sectionSummary {
+            font-size: 19px;
+          }
+
+          .count {
+            width: 100%;
+            margin-left: 32px;
+          }
+
+          .actions {
+            width: 100%;
+          }
+
+          .smallBtn,
+          .smallSelect {
+            flex: 1 1 auto;
+          }
+        }
+      `}</style>
     </main>
   );
 }

@@ -20,6 +20,7 @@ type DriverRow = {
   username: string | null;
   full_name: string | null;
   default_machine: string | null;
+  hourly_wage: number | null;
   is_active: boolean | null;
 };
 
@@ -40,23 +41,18 @@ type ItemRow = {
   objekt: string | null;
   maschine: string | null;
   fahrtzeit_min: number | null;
-
   mas_start: number | null;
   mas_end: number | null;
   maschinenstunden_h: number | null;
-
   unterhalt_h: number | null;
   reparatur_h: number | null;
   motormanuel_h: number | null;
   umsetzen_h: number | null;
   sonstiges_h: number | null;
   sonstiges_beschreibung: string | null;
-
   diesel_l: number | null;
   adblue_l: number | null;
-
   kommentar: string | null;
-
   twinch_used: boolean | null;
   twinch_h: number | null;
 };
@@ -64,6 +60,7 @@ type ItemRow = {
 type DriverOption = {
   id: string;
   label: string;
+  hourly_wage: number | null;
 };
 
 function todayISO() {
@@ -112,10 +109,7 @@ function listDatesInRange(from: string, to: string) {
 
 function sortByLastnameLabel(a: DriverOption, b: DriverOption) {
   const getLastName = (label: string) => {
-    const parts = String(label || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
+    const parts = String(label || "").trim().split(/\s+/).filter(Boolean);
     return parts.length === 0 ? "" : parts[parts.length - 1].toLowerCase();
   };
 
@@ -219,12 +213,7 @@ function hasWorkedDay(day: DayRow | undefined, item?: ItemRow | null) {
   return hasDayTime || hasDayComment || hasItemData;
 }
 
-function buildExportRows(
-  days: DayRow[],
-  items: ItemRow[],
-  driverMap: Map<string, string>,
-  hasItemFilter: boolean
-) {
+function buildExportRows(days: DayRow[], items: ItemRow[], driverMap: Map<string, string>, hasItemFilter: boolean) {
   const dayMap = new Map<string, DayRow>(days.map((d) => [d.id, d]));
   const workedDaySeen = new Set<string>();
 
@@ -233,12 +222,9 @@ function buildExportRows(
     const drvName = d?.user_id ? driverMap.get(d.user_id) ?? "" : "";
 
     const dayKey = d ? `${d.user_id}__${d.date}` : "";
-    const arbeitstag =
-      dayKey && hasWorkedDay(d, it) && !workedDaySeen.has(dayKey) ? 1 : "";
+    const arbeitstag = dayKey && hasWorkedDay(d, it) && !workedDaySeen.has(dayKey) ? 1 : "";
 
-    if (arbeitstag === 1) {
-      workedDaySeen.add(dayKey);
-    }
+    if (arbeitstag === 1) workedDaySeen.add(dayKey);
 
     return {
       driver: excelValue(drvName),
@@ -287,11 +273,7 @@ function buildExportRows(
           }),
         }));
 
-  return itemRows.length === 0
-    ? hasItemFilter
-      ? []
-      : specialDayRows
-    : [...itemRows, ...specialDayRows];
+  return itemRows.length === 0 ? (hasItemFilter ? [] : specialDayRows) : [...itemRows, ...specialDayRows];
 }
 
 function styleHeaderRow(worksheet: ExcelJS.Worksheet, columnCount: number) {
@@ -323,8 +305,7 @@ function styleHeaderRow(worksheet: ExcelJS.Worksheet, columnCount: number) {
 
 function styleWeekendRow(row: ExcelJS.Row, columnCount: number) {
   for (let c = 1; c <= columnCount; c++) {
-    const cell = row.getCell(c);
-    cell.fill = {
+    row.getCell(c).fill = {
       type: "pattern",
       pattern: "solid",
       fgColor: { argb: "FFF2F2F2" },
@@ -375,14 +356,8 @@ function setColumnWidths(worksheet: ExcelJS.Worksheet, headers: string[]) {
       return { key: h, width: 9 };
     }
 
-    if (["Urlaub", "Wetter", "Arbeitstag"].includes(h)) {
-      return { key: h, width: 8 };
-    }
-
-    if (["Beginn", "Ende"].includes(h)) {
-      return { key: h, width: 9 };
-    }
-
+    if (["Urlaub", "Wetter", "Arbeitstag"].includes(h)) return { key: h, width: 8 };
+    if (["Beginn", "Ende"].includes(h)) return { key: h, width: 9 };
     if (h === "Beschreibung") return { key: h, width: 18 };
     if (h === "Tageskommentar" || h === "Einsatzkommentar") return { key: h, width: 18 };
 
@@ -405,7 +380,7 @@ async function downloadWorkbook(workbook: ExcelJS.Workbook, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function addSumRow(worksheet: ExcelJS.Worksheet) {
+function addSumRow(worksheet: ExcelJS.Worksheet, hourlyWage?: number | null) {
   const rows = worksheet.rowCount;
   if (rows < 2) return;
 
@@ -436,8 +411,98 @@ function addSumRow(worksheet: ExcelJS.Worksheet) {
     }
   }
 
-  const row = worksheet.addRow(values);
-  styleSumRow(row, SHEET_HEADERS.length);
+  const sumRow = worksheet.addRow(values);
+  styleSumRow(sumRow, SHEET_HEADERS.length);
+
+  const sumRowNr = sumRow.number;
+
+  const rStunden = sumRowNr + 1;
+  const rLohn = sumRowNr + 2;
+  const rTage = sumRowNr + 3;
+  const rUeErlaubt = sumRowNr + 6;
+  const rFkErlaubt = sumRowNr + 7;
+  const rUeReel = sumRowNr + 8;
+  const rFkReel = sumRowNr + 9;
+  const rUeZuViel = sumRowNr + 10;
+  const rFkZusatz = sumRowNr + 12;
+  const rFkResult1 = sumRowNr + 13;
+  const rFkDiff = sumRowNr + 14;
+  const rPraemie = sumRowNr + 16;
+
+  const calcRows = [
+    ["Stunden", { formula: `SUM(E${sumRowNr}:J${sumRowNr})` }],
+    ["Lohn", hourlyWage ?? ""],
+    ["TAGE Monat", { formula: `L${sumRowNr}` }],
+    ["Überstunden MAX", { formula: `C${rTage}*1.6` }],
+    ["Fahrtkosten MAX", { formula: `C${rTage}*29` }],
+    ["Überstunden erlaubt", ""],
+    ["Fahrtkosten erlaubt", ""],
+    ["Überstunden reel", { formula: `C${rStunden}-(L${sumRowNr}*8)` }],
+    ["Fahrtkosten reel", { formula: `D${sumRowNr}/60*C${rLohn}` }],
+    ["Überstunden zu viel", { formula: `C${rUeReel}-C${rUeErlaubt}` }],
+    ["Resultierende Überstunden", { formula: `C${rUeReel}-C${rUeZuViel}` }],
+    ["Zusätzliche Fahrtkosten", { formula: `C${rUeZuViel}*C${rLohn}` }],
+    ["Resultierende Fahrtkosten (1)", { formula: `C${rFkZusatz}+C${rFkReel}` }],
+    ["Differenz zu max Fahrtkosten", { formula: `C${rFkResult1}-C${rFkErlaubt}` }],
+    ["Resultierende Fahrtkosten", { formula: `IF(C${rFkDiff}<0,C${rFkResult1},C${rFkErlaubt})` }],
+    ["Prämie", { formula: `IF(C${rFkDiff}>0,C${rFkDiff},0)` }],
+    ["Prämie in Stunden gerechnet", { formula: `C${rPraemie}/C${rLohn}` }],
+  ];
+
+  for (const [label, value] of calcRows) {
+    const row = worksheet.addRow([]);
+    row.getCell(1).value = label;
+    row.getCell(3).value = value as any;
+
+    row.getCell(1).border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+    row.getCell(2).border = row.getCell(1).border;
+    row.getCell(3).border = row.getCell(1).border;
+
+    row.getCell(1).font = { bold: true };
+    row.getCell(3).numFmt = "#,##0.0";
+
+    if (label === "Lohn" || label === "Überstunden erlaubt" || label === "Fahrtkosten erlaubt") {
+      row.getCell(3).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE2F0D9" },
+      };
+      row.getCell(3).font = { bold: true };
+    }
+
+    if (
+      label === "Resultierende Überstunden" ||
+      label === "Resultierende Fahrtkosten" ||
+      label === "Prämie" ||
+      label === "Prämie in Stunden gerechnet"
+    ) {
+      row.getCell(3).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FF9DC3E6" },
+      };
+    }
+
+    if (
+      label === "Fahrtkosten MAX" ||
+      label === "Fahrtkosten erlaubt" ||
+      label === "Fahrtkosten reel" ||
+      label === "Zusätzliche Fahrtkosten" ||
+      label === "Resultierende Fahrtkosten" ||
+      label === "Differenz zu max Fahrtkosten" ||
+      label === "Prämie"
+    ) {
+      row.getCell(3).numFmt = '#,##0 "€"';
+    }
+  }
+
+  worksheet.getColumn(1).width = Math.max(worksheet.getColumn(1).width || 10, 26);
+  worksheet.getColumn(3).width = Math.max(worksheet.getColumn(3).width || 10, 14);
 }
 
 async function exportToXLSX(filename: string, rows: Array<Record<string, any>>) {
@@ -453,9 +518,7 @@ async function exportToXLSX(filename: string, rows: Array<Record<string, any>>) 
   for (const r of rows) {
     const row = worksheet.addRow(headers.map((h) => r?.[h] ?? ""));
     const dateValue = String(r?.Datum ?? "");
-    if (dateValue && isWeekendISO(dateValue)) {
-      styleWeekendRow(row, headers.length);
-    }
+    if (dateValue && isWeekendISO(dateValue)) styleWeekendRow(row, headers.length);
   }
 
   worksheet.autoFilter = {
@@ -480,9 +543,7 @@ async function exportMonthlyDriverReportXLSX(
   const allDates = listDatesInRange(from, to);
 
   const daysByDriverDate = new Map<string, DayRow>();
-  for (const d of days) {
-    daysByDriverDate.set(`${d.user_id}__${d.date}`, d);
-  }
+  for (const d of days) daysByDriverDate.set(`${d.user_id}__${d.date}`, d);
 
   const itemsByWorkday = new Map<string, ItemRow[]>();
   for (const it of items) {
@@ -507,14 +568,9 @@ async function exportMonthlyDriverReportXLSX(
       const day = daysByDriverDate.get(`${drv.id}__${date}`);
 
       if (!day) {
-        const rowData = makeRow({
-          Datum: date,
-        });
-
+        const rowData = makeRow({ Datum: date });
         const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
-        if (isWeekendISO(date)) {
-          styleWeekendRow(row, SHEET_HEADERS.length);
-        }
+        if (isWeekendISO(date)) styleWeekendRow(row, SHEET_HEADERS.length);
         continue;
       }
 
@@ -532,20 +588,15 @@ async function exportMonthlyDriverReportXLSX(
         });
 
         const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
-        if (isWeekendISO(date)) {
-          styleWeekendRow(row, SHEET_HEADERS.length);
-        }
+        if (isWeekendISO(date)) styleWeekendRow(row, SHEET_HEADERS.length);
         continue;
       }
 
       for (const it of dayItems) {
         const dayKey = `${drv.id}__${date}`;
-        const arbeitstag =
-          hasWorkedDay(day, it) && !workedDaySeen.has(dayKey) ? 1 : "";
+        const arbeitstag = hasWorkedDay(day, it) && !workedDaySeen.has(dayKey) ? 1 : "";
 
-        if (arbeitstag === 1) {
-          workedDaySeen.add(dayKey);
-        }
+        if (arbeitstag === 1) workedDaySeen.add(dayKey);
 
         const rowData = makeRow({
           Datum: date,
@@ -574,13 +625,11 @@ async function exportMonthlyDriverReportXLSX(
         });
 
         const row = worksheet.addRow(SHEET_HEADERS.map((h) => rowData[h] ?? ""));
-        if (isWeekendISO(date)) {
-          styleWeekendRow(row, SHEET_HEADERS.length);
-        }
+        if (isWeekendISO(date)) styleWeekendRow(row, SHEET_HEADERS.length);
       }
     }
 
-    addSumRow(worksheet);
+    addSumRow(worksheet, drv.hourly_wage);
 
     worksheet.autoFilter = {
       from: { row: 1, column: 1 },
@@ -609,7 +658,6 @@ async function isAdmin() {
 export default function AdminExportPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
-
   const [mode, setMode] = useState<ExportMode>("all_range");
 
   const [from, setFrom] = useState<string>(() => firstOfMonthISO());
@@ -618,7 +666,6 @@ export default function AdminExportPage() {
   const [machines, setMachines] = useState<string[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
-
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
   const [selectedMachine, setSelectedMachine] = useState("");
@@ -629,28 +676,13 @@ export default function AdminExportPage() {
   const [loading, setLoading] = useState(false);
 
   const needsRange = useMemo(
-    () =>
-      mode === "machine_range" ||
-      mode === "driver_range" ||
-      mode === "all_range" ||
-      mode === "monthly_driver_tables",
+    () => mode === "machine_range" || mode === "driver_range" || mode === "all_range" || mode === "monthly_driver_tables",
     [mode]
   );
 
-  const needsMachine = useMemo(
-    () => mode === "machine_range" || mode === "machine_object",
-    [mode]
-  );
-
-  const needsDriver = useMemo(
-    () => mode === "driver_range" || mode === "driver_object",
-    [mode]
-  );
-
-  const needsObject = useMemo(
-    () => mode === "machine_object" || mode === "driver_object" || mode === "all_object",
-    [mode]
-  );
+  const needsMachine = useMemo(() => mode === "machine_range" || mode === "machine_object", [mode]);
+  const needsDriver = useMemo(() => mode === "driver_range" || mode === "driver_object", [mode]);
+  const needsObject = useMemo(() => mode === "machine_object" || mode === "driver_object" || mode === "all_object", [mode]);
 
   async function loadSelectors() {
     const [m, o, d] = await Promise.all([
@@ -658,7 +690,7 @@ export default function AdminExportPage() {
       supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
       supabase
         .from("driver_profiles")
-        .select("user_id,username,full_name,is_active")
+        .select("user_id,username,full_name,hourly_wage,is_active")
         .eq("is_active", true)
         .order("full_name", { ascending: true }),
     ]);
@@ -671,6 +703,7 @@ export default function AdminExportPage() {
     const drv = drvRows.map((x) => ({
       id: x.user_id,
       label: x.full_name?.trim() || x.username?.trim() || x.user_id,
+      hourly_wage: x.hourly_wage ?? null,
     }));
 
     setDrivers([...drv].sort(sortByLastnameLabel));
@@ -695,9 +728,7 @@ export default function AdminExportPage() {
       const ok = await isAdmin();
       setAdmin(ok);
 
-      if (ok) {
-        await loadSelectors();
-      }
+      if (ok) await loadSelectors();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -708,22 +739,10 @@ export default function AdminExportPage() {
       return;
     }
 
-    if (needsRange && (!from || !to)) {
-      setMsg("Bitte Zeitraum (von/bis) setzen.");
-      return;
-    }
-    if (needsMachine && !selectedMachine) {
-      setMsg("Bitte Maschine wählen.");
-      return;
-    }
-    if (needsDriver && !selectedDriver) {
-      setMsg("Bitte Fahrer wählen.");
-      return;
-    }
-    if (needsObject && !selectedObject) {
-      setMsg("Bitte Objekt wählen.");
-      return;
-    }
+    if (needsRange && (!from || !to)) return setMsg("Bitte Zeitraum (von/bis) setzen.");
+    if (needsMachine && !selectedMachine) return setMsg("Bitte Maschine wählen.");
+    if (needsDriver && !selectedDriver) return setMsg("Bitte Fahrer wählen.");
+    if (needsObject && !selectedObject) return setMsg("Bitte Objekt wählen.");
 
     setLoading(true);
     setMsg("Export wird geladen...");
@@ -809,11 +828,7 @@ export default function AdminExportPage() {
     await exportToXLSX(filename, finalRows);
 
     setLoading(false);
-    setMsg(
-      finalRows.length === 0
-        ? "✅ Keine Daten im Filter. Leere XLSX exportiert."
-        : `✅ Export fertig: ${finalRows.length} Zeilen`
-    );
+    setMsg(finalRows.length === 0 ? "✅ Keine Daten im Filter. Leere XLSX exportiert." : `✅ Export fertig: ${finalRows.length} Zeilen`);
   }
 
   if (admin === null) {
@@ -832,9 +847,7 @@ export default function AdminExportPage() {
         <p style={{ marginTop: 10, color: "crimson" }}>❌ Kein Admin-Zugriff.</p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
           <Link href="/admin">
-            <button style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "#fff", fontWeight: 800 }}>
-              Zurück
-            </button>
+            <button style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "#fff", fontWeight: 800 }}>Zurück</button>
           </Link>
           <Link href="/app">
             <button style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "#fff", fontWeight: 800 }}>
