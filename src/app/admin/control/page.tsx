@@ -39,7 +39,6 @@ type ItemRow = {
   motormanuel_h: number | null;
   umsetzen_h: number | null;
   sonstiges_h: number | null;
-  sonstiges_beschreibung: string | null;
   diesel_l: number | null;
   adblue_l: number | null;
   kommentar: string | null;
@@ -142,6 +141,36 @@ function sortByLastname(a: DriverRow, b: DriverRow) {
   return String(a.full_name || "").localeCompare(String(b.full_name || ""), "de", { sensitivity: "base" });
 }
 
+function timeDiffHours(start: string | null, end: string | null) {
+  if (!start || !end) return null;
+
+  const [sh, sm] = start.split(":").map(Number);
+  const [eh, em] = end.split(":").map(Number);
+
+  if (![sh, sm, eh, em].every(Number.isFinite)) return null;
+
+  let startMin = sh * 60 + sm;
+  let endMin = eh * 60 + em;
+
+  if (endMin < startMin) endMin += 24 * 60;
+
+  return (endMin - startMin) / 60;
+}
+
+function sumWorkedHours(items: ItemRow[]) {
+  return items.reduce((sum, it) => {
+    return (
+      sum +
+      (it.maschinenstunden_h ?? 0) +
+      (it.unterhalt_h ?? 0) +
+      (it.reparatur_h ?? 0) +
+      (it.motormanuel_h ?? 0) +
+      (it.umsetzen_h ?? 0) +
+      (it.sonstiges_h ?? 0)
+    );
+  }, 0);
+}
+
 export default function AdminControlPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
@@ -155,6 +184,8 @@ export default function AdminControlPage() {
   const [days, setDays] = useState<ControlDay[]>([]);
 
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
+  const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
+
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -226,7 +257,7 @@ export default function AdminControlPage() {
       const itemRes = await supabase
         .from("work_items")
         .select(
-          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
+          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
         )
         .in("workday_id", dayIds);
 
@@ -255,13 +286,15 @@ export default function AdminControlPage() {
     const nextEdits: Record<string, Partial<Record<NumField, string>>> = {};
     for (const item of itemRows) {
       nextEdits[item.id] = {};
-      for (const f of NUM_FIELDS) {
-        nextEdits[item.id]![f] = toEditValue(item[f]);
-      }
+      for (const f of NUM_FIELDS) nextEdits[item.id]![f] = toEditValue(item[f]);
     }
+
+    const nextComments: Record<string, string> = {};
+    for (const day of finalDays) nextComments[day.id] = day.kommentar ?? "";
 
     setDays(finalDays);
     setEdits(nextEdits);
+    setCommentEdits(nextComments);
     setMsg("");
     setBusy(false);
   }
@@ -282,14 +315,11 @@ export default function AdminControlPage() {
 
   async function saveItem(item: ItemRow) {
     const e = edits[item.id] ?? {};
-
     const payload: Record<string, number | null> = {};
-    for (const f of NUM_FIELDS) {
-      payload[f] = toNumOrNull(e[f] ?? "");
-    }
+
+    for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? "");
 
     const { error } = await supabase.from("work_items").update(payload).eq("id", item.id);
-
     if (error) throw new Error(error.message);
   }
 
@@ -300,13 +330,12 @@ export default function AdminControlPage() {
     setMsg("Speichere Kontrolle...");
 
     try {
-      for (const item of day.items) {
-        await saveItem(item);
-      }
+      for (const item of day.items) await saveItem(item);
 
       const { error } = await supabase
         .from("workdays")
         .update({
+          kommentar: commentEdits[day.id]?.trim() || null,
           is_controlled: true,
           controlled_at: new Date().toISOString(),
         })
@@ -349,17 +378,32 @@ export default function AdminControlPage() {
   }
 
   const grouped = useMemo(() => {
-    const g = new Map<string, ControlDay[]>();
+    const weeks = new Map<string, Map<string, ControlDay[]>>();
 
     for (const d of days) {
-      const key = isoWeekKey(d.date);
-      const arr = g.get(key) ?? [];
+      const weekKey = isoWeekKey(d.date);
+      if (!weeks.has(weekKey)) weeks.set(weekKey, new Map());
+
+      const driverKey = d.driverName || d.user_id;
+      const driverMap = weeks.get(weekKey)!;
+      const arr = driverMap.get(driverKey) ?? [];
       arr.push(d);
-      g.set(key, arr);
+      driverMap.set(driverKey, arr);
     }
 
-    const keys = Array.from(g.keys()).sort((a, b) => (a < b ? 1 : -1));
-    return keys.map((key) => ({ key, days: g.get(key)! }));
+    const weekKeys = Array.from(weeks.keys()).sort((a, b) => (a < b ? 1 : -1));
+
+    return weekKeys.map((weekKey) => {
+      const driverMap = weeks.get(weekKey)!;
+      const driverGroups = Array.from(driverMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b, "de", { sensitivity: "base" }))
+        .map(([driverName, driverDays]) => ({
+          driverName,
+          days: driverDays.sort((a, b) => (a.date < b.date ? 1 : -1)),
+        }));
+
+      return { key: weekKey, drivers: driverGroups };
+    });
   }, [days]);
 
   if (admin === null) {
@@ -453,76 +497,109 @@ export default function AdminControlPage() {
             <summary className="weekSummary">
               <span className="plus">＋</span>
               <span>{w.key}</span>
-              <span className="count">{w.days.length} Tage</span>
             </summary>
 
-            <div className="days">
-              {w.days.map((d) => (
-                <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"}>
-                  <summary className="daySummary">
-                    <div>
-                      <b>{fmtDE(d.date)}</b> · {d.driverName}
-                      {d.is_urlaub && <span className="badge green">Urlaub</span>}
-                      {d.is_wetter && <span className="badge blue">Wetter</span>}
-                      {d.is_controlled && <span className="badge done">Kontrolliert</span>}
-                    </div>
-                    <span className="count">{d.items.length} Einsätze</span>
+            <div className="drivers">
+              {w.drivers.map((driverGroup) => (
+                <details key={driverGroup.driverName} className="driverCard" open>
+                  <summary className="driverSummary">
+                    <span className="plus">＋</span>
+                    <span>{driverGroup.driverName}</span>
                   </summary>
 
-                  {d.kommentar && <div className="comment">Tageskommentar: {d.kommentar}</div>}
+                  <div className="days">
+                    {driverGroup.days.map((d) => {
+                      const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
+                      const geleistet = sumWorkedHours(d.items);
+                      const diff = arbeitszeit === null ? null : geleistet - arbeitszeit;
 
-                  {d.items.length === 0 ? (
-                    <div className="empty">Keine Einsätze</div>
-                  ) : (
-                    <div className="items">
-                      {d.items.map((it, idx) => (
-                        <div key={it.id} className="itemRow">
-                          <div className="itemHead">
+                      return (
+                        <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"}>
+                          <summary className="daySummary">
                             <div>
-                              <b>Einsatz {idx + 1}</b> · {it.objekt || "Ohne Objekt"} · {it.maschine || "Ohne Maschine"}
+                              <b>{fmtDE(d.date)}</b>
+                              {d.is_urlaub && <span className="badge green">Urlaub</span>}
+                              {d.is_wetter && <span className="badge blue">Wetter</span>}
+                              {d.is_controlled && <span className="badge done">Kontrolliert</span>}
+                            </div>
+                          </summary>
+
+                          <div className="compareBox">
+                            <div>
+                              <b>Arbeitszeit:</b>{" "}
+                              {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
+                              <span className="small">
+                                ({d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"})
+                              </span>
+                            </div>
+                            <div>
+                              <b>Geleistete Stunden:</b> {geleistet.toFixed(2)} h
+                              <span className="small"> ohne Fahrtzeit</span>
+                            </div>
+                            <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
+                              <b>Differenz:</b> {diff === null ? "-" : `${diff.toFixed(2)} h`}
                             </div>
                           </div>
 
-                          <div className="editGrid">
-                            <NumberInput label="Fahrtzeit min" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
-                            <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
-                            <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
-                            <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
-                            <NumberInput label="Unterhalt" value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
-                            <NumberInput label="Reparatur" value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
-                            <NumberInput label="Motormanuel" value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
-                            <NumberInput label="Umsetzen" value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
-                            <NumberInput label="Sonstiges" value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
-                            <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
-                            <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
-                            <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
-                          </div>
+                          <label className="commentEdit">
+                            Tageskommentar
+                            <textarea
+                              value={commentEdits[d.id] ?? ""}
+                              onChange={(e) =>
+                                setCommentEdits((prev) => ({
+                                  ...prev,
+                                  [d.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="Tageskommentar..."
+                            />
+                          </label>
 
-                          {(it.sonstiges_beschreibung || it.kommentar) && (
-                            <div className="comment">
-                              {it.sonstiges_beschreibung && <>Beschreibung: {it.sonstiges_beschreibung}</>}
-                              {it.kommentar && <> · Kommentar: {it.kommentar}</>}
+                          {d.items.length === 0 ? (
+                            <div className="empty">Keine Einsätze</div>
+                          ) : (
+                            <div className="items">
+                              {d.items.map((it, itemIdx) => (
+                                <div key={it.id} className="itemRow">
+                                  <div className="itemHead">
+                                    <div>
+                                      <b>Einsatz {itemIdx + 1}</b> · {it.objekt || "Ohne Objekt"} · {it.maschine || "Ohne Maschine"}
+                                    </div>
+                                  </div>
+
+                                  <div className="editGrid">
+                                    <NumberInput label="Fahrtzeit min" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
+                                    <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
+                                    <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
+                                    <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
+                                    <NumberInput label="Unterhalt" value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
+                                    <NumberInput label="Reparatur" value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
+                                    <NumberInput label="Motormanuel" value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
+                                    <NumberInput label="Umsetzen" value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
+                                    <NumberInput label="Sonstiges" value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
+                                    <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
+                                    <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
+                                    <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
 
-                  <div className="dayActions">
-                    <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
-                      Speichern + kontrolliert
-                    </button>
+                          <div className="dayActions">
+                            <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
+                              Speichern + kontrolliert
+                            </button>
 
-                    {d.is_controlled && (
-                      <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">
-                        Wieder öffnen
-                      </button>
-                    )}
-
-                    <Link href={`/app/day/${d.id}`}>
-                      <button className="btn">Tag öffnen</button>
-                    </Link>
+                            {d.is_controlled && (
+                              <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">
+                                Wieder öffnen
+                              </button>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
                   </div>
                 </details>
               ))}
@@ -557,7 +634,7 @@ const baseStyles = `
 .btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:800;cursor:pointer}
 .btn{padding:10px 12px;border-radius:12px}
 .btnPrimary{padding:12px 14px;border-radius:12px;font-weight:900}
-.card,.weekCard,.dayCard{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
+.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
 .card{margin-top:14px}
 .filterGrid{display:grid;grid-template-columns:1fr 1fr 1.4fr 1.4fr auto;gap:10px;align-items:end}
 .field{display:block}
@@ -566,25 +643,30 @@ const baseStyles = `
 .msg{margin-top:10px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:12px;padding:10px}
 .bad{color:crimson;font-weight:800}
 .weeks{display:grid;gap:12px;margin-top:14px}
-.weekSummary,.daySummary{cursor:pointer;display:flex;align-items:center;gap:10px;font-weight:900;list-style:none;user-select:none}
-.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker{display:none}
+.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:10px;font-weight:900;list-style:none;user-select:none}
+.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}
 .plus{display:inline-block;transition:transform .12s ease;font-size:22px}
-details[open]>.weekSummary .plus,details[open]>.daySummary .plus{transform:rotate(45deg)}
-.count{margin-left:auto;opacity:.65;font-weight:800}
-.days{display:grid;gap:10px;margin-top:12px}
+details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
+.drivers,.days{display:grid;gap:10px;margin-top:12px}
+.driverCard{background:#fcfcfc}
 .dayCard{padding:12px}
 .dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
 .badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:900}
 .badge.green{background:#ecfdf3;border:1px solid #c7f2d5}
 .badge.blue{background:#eef6ff;border:1px solid #cfe4ff}
 .badge.done{background:#e2f0d9;border:1px solid #b6d7a8}
+.compareBox{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px;border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
+.diffWarn{color:crimson;font-weight:900}
+.diffOk{color:green;font-weight:900}
+.small{font-size:12px;opacity:.72;margin-left:4px}
+.commentEdit{display:block;margin-top:10px;font-weight:800}
+.commentEdit textarea{width:100%;min-height:70px;margin-top:6px;padding:10px;border:1px solid #ddd;border-radius:12px;font-size:15px;box-sizing:border-box}
 .items{display:grid;gap:8px;margin-top:10px}
 .itemRow{border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
 .itemHead{display:flex;justify-content:space-between;gap:10px;align-items:center}
 .editGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
 .numField{font-size:12px;font-weight:800;opacity:.95}
 .numField input{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;font-size:15px;box-sizing:border-box;background:#fff}
-.comment{font-size:13px;margin-top:8px;opacity:.82}
 .empty{margin-top:10px;opacity:.65}
 .dayActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
 @media(max-width:700px){
@@ -592,8 +674,8 @@ details[open]>.weekSummary .plus,details[open]>.daySummary .plus{transform:rotat
   .head{flex-direction:column;align-items:stretch}
   .filterGrid{grid-template-columns:1fr}
   .daySummary{align-items:flex-start;flex-direction:column}
-  .count{margin-left:0}
   .editGrid{grid-template-columns:1fr 1fr}
+  .compareBox{grid-template-columns:1fr}
   .dayActions .btn,.dayActions .btnPrimary{width:100%}
 }
 `;

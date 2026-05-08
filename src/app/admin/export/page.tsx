@@ -24,6 +24,12 @@ type DriverRow = {
   is_active: boolean | null;
 };
 
+type MachineRow = {
+  name: string;
+  hourly_rate: number | null;
+  machine_type: string | null;
+};
+
 type DayRow = {
   id: string;
   user_id: string;
@@ -63,73 +69,6 @@ type DriverOption = {
   hourly_wage: number | null;
 };
 
-function todayISO() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function firstOfMonthISO() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}-01`;
-}
-
-function sanitizeFilename(s: string) {
-  return s.replace(/[^\w.\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
-}
-
-function excelValue(v: any) {
-  if (v === null || v === undefined) return "";
-  return v;
-}
-
-function listDatesInRange(from: string, to: string) {
-  const result: string[] = [];
-  if (!from || !to) return result;
-
-  const start = new Date(`${from}T00:00:00`);
-  const end = new Date(`${to}T00:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
-
-  const cur = new Date(start);
-  while (cur <= end) {
-    const y = cur.getFullYear();
-    const m = String(cur.getMonth() + 1).padStart(2, "0");
-    const d = String(cur.getDate()).padStart(2, "0");
-    result.push(`${y}-${m}-${d}`);
-    cur.setDate(cur.getDate() + 1);
-  }
-
-  return result;
-}
-
-function sortByLastnameLabel(a: DriverOption, b: DriverOption) {
-  const getLastName = (label: string) => {
-    const parts = String(label || "").trim().split(/\s+/).filter(Boolean);
-    return parts.length === 0 ? "" : parts[parts.length - 1].toLowerCase();
-  };
-
-  const lastA = getLastName(a.label);
-  const lastB = getLastName(b.label);
-
-  const cmpLast = lastA.localeCompare(lastB, "de", { sensitivity: "base" });
-  if (cmpLast !== 0) return cmpLast;
-
-  return String(a.label || "").localeCompare(String(b.label || ""), "de", {
-    sensitivity: "base",
-  });
-}
-
-function isWeekendISO(date: string) {
-  const d = new Date(`${date}T00:00:00`);
-  const day = d.getDay();
-  return day === 0 || day === 6;
-}
-
 const SHEET_HEADERS = [
   "Datum",
   "Objekt",
@@ -157,6 +96,83 @@ const SHEET_HEADERS = [
 ] as const;
 
 type SheetHeader = (typeof SHEET_HEADERS)[number];
+
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function firstOfMonthISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function sanitizeFilename(s: string) {
+  return s.replace(/[^\w.\-ÄÖÜäöüß]/g, "_").replace(/_+/g, "_");
+}
+
+function excelValue(v: any) {
+  if (v === null || v === undefined) return "";
+  return v;
+}
+
+function listDatesInRange(from: string, to: string) {
+  const result: string[] = [];
+  if (!from || !to) return result;
+
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
+
+  const cur = new Date(start);
+  while (cur <= end) {
+    result.push(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`);
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return result;
+}
+
+function sortByLastnameLabel(a: DriverOption, b: DriverOption) {
+  const getLastName = (label: string) => {
+    const parts = String(label || "").trim().split(/\s+/).filter(Boolean);
+    return parts.length === 0 ? "" : parts[parts.length - 1].toLowerCase();
+  };
+
+  const cmpLast = getLastName(a.label).localeCompare(getLastName(b.label), "de", { sensitivity: "base" });
+  if (cmpLast !== 0) return cmpLast;
+
+  return String(a.label || "").localeCompare(String(b.label || ""), "de", { sensitivity: "base" });
+}
+
+function isWeekendISO(date: string) {
+  const d = new Date(`${date}T00:00:00`);
+  const day = d.getDay();
+  return day === 0 || day === 6;
+}
+
+function isoWeekShort(dateISO: string) {
+  const [y, m, d] = dateISO.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const day = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - day);
+
+  const isoYear = date.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1, 12, 0, 0));
+  const yearStartDay = yearStart.getUTCDay() || 7;
+  const firstThursday = new Date(yearStart);
+  firstThursday.setUTCDate(firstThursday.getUTCDate() + (4 - yearStartDay));
+
+  const week = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  return `${String(week).padStart(2, "0")}/${String(isoYear).slice(-2)}`;
+}
+
+function initials(name: string) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
 
 function makeRow(values?: Partial<Record<SheetHeader, any>>) {
   return {
@@ -283,17 +299,8 @@ function styleHeaderRow(worksheet: ExcelJS.Worksheet, columnCount: number) {
   for (let c = 1; c <= columnCount; c++) {
     const cell = headerRow.getCell(c);
     cell.font = { bold: true };
-    cell.alignment = {
-      vertical: "middle",
-      horizontal: "center",
-      textRotation: 90,
-      wrapText: true,
-    };
-    cell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FFD9E2F3" },
-    };
+    cell.alignment = { vertical: "middle", horizontal: "center", textRotation: 90, wrapText: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E2F3" } };
     cell.border = {
       top: { style: "thin", color: { argb: "FFBFBFBF" } },
       left: { style: "thin", color: { argb: "FFBFBFBF" } },
@@ -305,11 +312,7 @@ function styleHeaderRow(worksheet: ExcelJS.Worksheet, columnCount: number) {
 
 function styleWeekendRow(row: ExcelJS.Row, columnCount: number) {
   for (let c = 1; c <= columnCount; c++) {
-    row.getCell(c).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FFF2F2F2" },
-    };
+    row.getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
   }
 }
 
@@ -317,11 +320,7 @@ function styleSumRow(row: ExcelJS.Row, columnCount: number) {
   for (let c = 1; c <= columnCount; c++) {
     const cell = row.getCell(c);
     cell.font = { bold: true };
-    cell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FFE2F0D9" },
-    };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2F0D9" } };
     cell.border = {
       top: { style: "thin", color: { argb: "FF9E9E9E" } },
       left: { style: "thin", color: { argb: "FF9E9E9E" } },
@@ -367,9 +366,7 @@ function setColumnWidths(worksheet: ExcelJS.Worksheet, headers: string[]) {
 
 async function downloadWorkbook(workbook: ExcelJS.Workbook, filename: string) {
   const buffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([buffer], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -454,12 +451,7 @@ function addSumRow(worksheet: ExcelJS.Worksheet, hourlyWage?: number | null) {
     row.getCell(1).value = label;
     row.getCell(3).value = value as any;
 
-    row.getCell(1).border = {
-      top: { style: "thin" },
-      left: { style: "thin" },
-      bottom: { style: "thin" },
-      right: { style: "thin" },
-    };
+    row.getCell(1).border = { top: { style: "thin" }, left: { style: "thin" }, bottom: { style: "thin" }, right: { style: "thin" } };
     row.getCell(2).border = row.getCell(1).border;
     row.getCell(3).border = row.getCell(1).border;
 
@@ -467,11 +459,7 @@ function addSumRow(worksheet: ExcelJS.Worksheet, hourlyWage?: number | null) {
     row.getCell(3).numFmt = "#,##0.0";
 
     if (label === "Lohn" || label === "Überstunden erlaubt" || label === "Fahrtkosten erlaubt") {
-      row.getCell(3).fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "FFE2F0D9" },
-      };
+      row.getCell(3).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2F0D9" } };
       row.getCell(3).font = { bold: true };
     }
 
@@ -481,11 +469,7 @@ function addSumRow(worksheet: ExcelJS.Worksheet, hourlyWage?: number | null) {
       label === "Prämie" ||
       label === "Prämie in Stunden gerechnet"
     ) {
-      row.getCell(3).fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "FF9DC3E6" },
-      };
+      row.getCell(3).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF9DC3E6" } };
     }
 
     if (
@@ -521,12 +505,218 @@ async function exportToXLSX(filename: string, rows: Array<Record<string, any>>) 
     if (dateValue && isWeekendISO(dateValue)) styleWeekendRow(row, headers.length);
   }
 
-  worksheet.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: headers.length },
-  };
-
+  worksheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: headers.length } };
   worksheet.views = [{ state: "frozen", ySplit: 1 }];
+
+  await downloadWorkbook(workbook, filename);
+}
+
+function addHours(target: Map<string, Map<string, number>>, week: string, driverInitials: string, hours: number) {
+  if (!hours || !Number.isFinite(hours)) return;
+  if (!target.has(week)) target.set(week, new Map());
+  const row = target.get(week)!;
+  row.set(driverInitials, (row.get(driverInitials) ?? 0) + hours);
+}
+
+async function exportLotObjectXLSX(
+  filename: string,
+  selectedObject: string,
+  days: DayRow[],
+  items: ItemRow[],
+  driverMap: Map<string, string>,
+  machineRows: MachineRow[]
+) {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet("Los-Auswertung");
+
+  const machineMap = new Map<string, MachineRow>();
+  for (const m of machineRows) machineMap.set(m.name, m);
+
+  const dayMap = new Map<string, DayRow>();
+  for (const d of days) dayMap.set(d.id, d);
+
+  const relevantItems = items.filter((it) => (it.objekt ?? "").trim() === selectedObject.trim());
+
+  const usedHarvester = Array.from(
+    new Set(
+      relevantItems
+        .filter((it) => machineMap.get(it.maschine ?? "")?.machine_type === "harvester")
+        .map((it) => it.maschine ?? "")
+        .filter(Boolean)
+    )
+  );
+
+  const usedForwarder = Array.from(
+    new Set(
+      relevantItems
+        .filter((it) => machineMap.get(it.maschine ?? "")?.machine_type === "forwarder")
+        .map((it) => it.maschine ?? "")
+        .filter(Boolean)
+    )
+  );
+
+  const harvesterData = new Map<string, Map<string, Map<string, number>>>();
+  const forwarderData = new Map<string, Map<string, Map<string, number>>>();
+  const motormanuelData = new Map<string, Map<string, number>>();
+  const sonstigesData = new Map<string, Map<string, number>>();
+  const weeksSet = new Set<string>();
+
+  for (const it of relevantItems) {
+    const day = dayMap.get(it.workday_id);
+    if (!day) continue;
+
+    const week = isoWeekShort(day.date);
+    weeksSet.add(week);
+
+    const driverName = driverMap.get(day.user_id) ?? day.user_id;
+    const ini = initials(driverName);
+
+    const machineName = it.maschine ?? "";
+    const machine = machineMap.get(machineName);
+    const machineType = machine?.machine_type ?? "";
+
+    if (machineType === "harvester") {
+      if (!harvesterData.has(machineName)) harvesterData.set(machineName, new Map());
+      addHours(harvesterData.get(machineName)!, week, ini, Number(it.maschinenstunden_h ?? 0));
+    }
+
+    if (machineType === "forwarder") {
+      if (!forwarderData.has(machineName)) forwarderData.set(machineName, new Map());
+      addHours(forwarderData.get(machineName)!, week, ini, Number(it.maschinenstunden_h ?? 0));
+    }
+
+    const motormanuelHours =
+      Number(it.motormanuel_h ?? 0) +
+      (machineName.trim().toLowerCase() === "motorsäge" ? Number(it.maschinenstunden_h ?? 0) : 0);
+
+    addHours(motormanuelData, week, ini, motormanuelHours);
+    addHours(sonstigesData, week, ini, Number(it.sonstiges_h ?? 0));
+  }
+
+  const weeks = Array.from(weeksSet).sort((a, b) => a.localeCompare(b));
+
+  const blocks: Array<{ title: string; machineName?: string; data: Map<string, Map<string, number>>; rate: number | null }> = [];
+
+  for (const name of usedHarvester) {
+    blocks.push({
+      title: "Harvester",
+      machineName: name,
+      data: harvesterData.get(name) ?? new Map(),
+      rate: machineMap.get(name)?.hourly_rate ?? null,
+    });
+  }
+
+  for (const name of usedForwarder) {
+    blocks.push({
+      title: "Forwarder",
+      machineName: name,
+      data: forwarderData.get(name) ?? new Map(),
+      rate: machineMap.get(name)?.hourly_rate ?? null,
+    });
+  }
+
+  blocks.push({
+    title: "Motormanuel",
+    machineName: "Motorsäge",
+    data: motormanuelData,
+    rate: machineMap.get("Motorsäge")?.hourly_rate ?? null,
+  });
+
+  blocks.push({
+    title: "Sonstiges",
+    machineName: "Sonstiges",
+    data: sonstigesData,
+    rate: null,
+  });
+
+  ws.getCell("A1").value = selectedObject;
+  ws.getCell("A1").font = { bold: true, size: 14 };
+
+  ws.getCell("A2").value = "KW";
+  ws.getCell("A2").font = { bold: true };
+  ws.getColumn(1).width = 12;
+
+  let col = 2;
+
+  for (const block of blocks) {
+    ws.mergeCells(1, col, 1, col + 1);
+    ws.getCell(1, col).value = block.title;
+    ws.getCell(1, col).font = { bold: true };
+    ws.getCell(1, col).alignment = { horizontal: "center" };
+
+    ws.getCell(2, col).value = "Name";
+    ws.getCell(2, col + 1).value = "Stunden";
+    ws.getCell(2, col).font = { bold: true };
+    ws.getCell(2, col + 1).font = { bold: true };
+
+    ws.getColumn(col).width = 14;
+    ws.getColumn(col + 1).width = 12;
+
+    col += 2;
+  }
+
+  let rowNr = 3;
+
+  for (const week of weeks) {
+    ws.getCell(rowNr, 1).value = week;
+    ws.getCell(rowNr, 1).font = { bold: true };
+
+    col = 2;
+
+    for (const block of blocks) {
+      const driverMapForWeek = block.data.get(week) ?? new Map();
+      const names = Array.from(driverMapForWeek.keys()).sort().join("+");
+      const hours = Array.from(driverMapForWeek.values()).reduce((a, b) => a + b, 0);
+
+      ws.getCell(rowNr, col).value = names;
+      ws.getCell(rowNr, col + 1).value = hours || "";
+      ws.getCell(rowNr, col + 1).numFmt = "#,##0.0";
+
+      col += 2;
+    }
+
+    rowNr++;
+  }
+
+  const totalRow = Math.max(rowNr + 8, 16);
+  ws.getCell(totalRow, 1).value = "TOTAL";
+  ws.getCell(totalRow, 1).font = { bold: true };
+
+  col = 2;
+
+  for (const block of blocks) {
+    const rate = block.rate ?? "";
+    const hoursCol = ws.getColumn(col + 1).letter;
+
+    ws.getCell(totalRow, col).value = rate === "" ? "" : `${rate} €`;
+    ws.getCell(totalRow, col + 1).value = { formula: `SUM(${hoursCol}3:${hoursCol}${rowNr - 1})` };
+    ws.getCell(totalRow, col + 1).numFmt = "#,##0.0";
+
+    col += 2;
+  }
+
+  const lastCol = col - 1;
+
+  for (let r = 1; r <= totalRow; r++) {
+    for (let c = 1; c <= lastCol; c++) {
+      const cell = ws.getCell(r, c);
+      cell.border = {
+        top: { style: "thin" },
+        left: { style: "thin" },
+        bottom: { style: "thin" },
+        right: { style: "thin" },
+      };
+      cell.alignment = { vertical: "middle", horizontal: "center" };
+    }
+  }
+
+  for (let c = 1; c <= lastCol; c++) {
+    ws.getCell(1, c).font = { bold: true };
+    ws.getCell(2, c).font = { bold: true };
+    ws.getCell(1, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E2F3" } };
+    ws.getCell(2, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E2F3" } };
+    ws.getCell(totalRow, c).font = { bold: true };
+  }
 
   await downloadWorkbook(workbook, filename);
 }
@@ -631,11 +821,7 @@ async function exportMonthlyDriverReportXLSX(
 
     addSumRow(worksheet, drv.hourly_wage);
 
-    worksheet.autoFilter = {
-      from: { row: 1, column: 1 },
-      to: { row: 1, column: SHEET_HEADERS.length },
-    };
-
+    worksheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: SHEET_HEADERS.length } };
     worksheet.views = [{ state: "frozen", ySplit: 1 }];
   }
 
@@ -664,6 +850,7 @@ export default function AdminExportPage() {
   const [to, setTo] = useState<string>(() => todayISO());
 
   const [machines, setMachines] = useState<string[]>([]);
+  const [machineRows, setMachineRows] = useState<MachineRow[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
@@ -686,7 +873,7 @@ export default function AdminExportPage() {
 
   async function loadSelectors() {
     const [m, o, d] = await Promise.all([
-      supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true }),
+      supabase.from("machines").select("name,hourly_rate,machine_type").eq("is_active", true).order("name", { ascending: true }),
       supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
       supabase
         .from("driver_profiles")
@@ -695,7 +882,10 @@ export default function AdminExportPage() {
         .order("full_name", { ascending: true }),
     ]);
 
-    setMachines(((m.data as any[]) ?? []).map((x) => x.name));
+    const machineData = (((m.data as any[]) ?? []) as MachineRow[]);
+    setMachineRows(machineData);
+    setMachines(machineData.map((x) => x.name));
+
     setObjects(((o.data as any[]) ?? []).map((x) => x.name));
 
     const drvRows = (((d.data as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
@@ -795,6 +985,15 @@ export default function AdminExportPage() {
       items = items.filter((it) => (it.objekt ?? "").trim() === o);
     }
 
+    if (mode === "all_object") {
+      const filename = sanitizeFilename(`Los-Auswertung_${selectedObject}.xlsx`);
+      await exportLotObjectXLSX(filename, selectedObject, days, items, driverMap, machineRows);
+
+      setLoading(false);
+      setMsg("✅ Los-Auswertung exportiert.");
+      return;
+    }
+
     if (mode === "monthly_driver_tables") {
       const filename = sanitizeFilename(`Monatsbericht_Fahrer_${from}_bis_${to}.xlsx`);
       await exportMonthlyDriverReportXLSX(filename, days, items, drivers, from, to);
@@ -890,7 +1089,7 @@ export default function AdminExportPage() {
             <option value="machine_object">Pro Maschine · Objekt</option>
             <option value="driver_object">Pro Fahrer · Objekt</option>
             <option value="all_range">Alles · Zeitraum</option>
-            <option value="all_object">Alles · Objekt</option>
+            <option value="all_object">Alles · Objekt / Los-Auswertung</option>
             <option value="monthly_driver_tables">Monatsbericht · Fahrer-Tabellen</option>
           </select>
         </label>
