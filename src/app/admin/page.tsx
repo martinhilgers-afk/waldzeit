@@ -11,6 +11,7 @@ type Row = {
   is_active: boolean;
   created_at: string;
   hourly_rate?: number | null;
+  machine_type?: string | null;
 };
 
 type DriverRow = {
@@ -51,6 +52,7 @@ export default function AdminPage() {
   const [newObject, setNewObject] = useState("");
   const [newMachine, setNewMachine] = useState("");
   const [newMachineHourlyRate, setNewMachineHourlyRate] = useState("");
+  const [newMachineType, setNewMachineType] = useState("");
 
   const [newDriverUserId, setNewDriverUserId] = useState("");
   const [newDriverUsername, setNewDriverUsername] = useState("");
@@ -100,35 +102,22 @@ export default function AdminPage() {
 
     setObjects((o.data as any) ?? []);
     setMachines((m.data as any) ?? []);
-const driverData = ((d.data as any) ?? []) as DriverRow[];
 
-driverData.sort((a, b) => {
-  const getLastName = (name: string) => {
-    const parts = String(name || "")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
+    const driverData = ((d.data as any) ?? []) as DriverRow[];
 
-    return parts.length === 0
-      ? ""
-      : parts[parts.length - 1].toLowerCase();
-  };
+    driverData.sort((a, b) => {
+      const getLastName = (name: string) => {
+        const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+        return parts.length === 0 ? "" : parts[parts.length - 1].toLowerCase();
+      };
 
-  const lastA = getLastName(a.full_name);
-  const lastB = getLastName(b.full_name);
+      const cmp = getLastName(a.full_name).localeCompare(getLastName(b.full_name), "de", { sensitivity: "base" });
+      if (cmp !== 0) return cmp;
 
-  const cmp = lastA.localeCompare(lastB, "de", {
-    sensitivity: "base",
-  });
+      return a.full_name.localeCompare(b.full_name, "de", { sensitivity: "base" });
+    });
 
-  if (cmp !== 0) return cmp;
-
-  return a.full_name.localeCompare(b.full_name, "de", {
-    sensitivity: "base",
-  });
-});
-
-setDrivers(driverData);
+    setDrivers(driverData);
   }
 
   async function add(kind: "objects" | "machines") {
@@ -140,7 +129,11 @@ setDrivers(driverData);
     setBusy(true);
 
     const payload: any = { name };
-    if (kind === "machines") payload.hourly_rate = toNumOrNull(newMachineHourlyRate);
+
+    if (kind === "machines") {
+      payload.hourly_rate = toNumOrNull(newMachineHourlyRate);
+      payload.machine_type = newMachineType || null;
+    }
 
     const { error } = await supabase.from(kind).insert(payload);
 
@@ -155,6 +148,7 @@ setDrivers(driverData);
     } else {
       setNewMachine("");
       setNewMachineHourlyRate("");
+      setNewMachineType("");
     }
 
     setMsg("✅ Gespeichert");
@@ -231,6 +225,25 @@ setDrivers(driverData);
     }
 
     setMsg("✅ Stundenpreis gespeichert");
+    await loadAll();
+  }
+
+  async function setMachineType(row: Row, machineType: string) {
+    setMsg("Speichern...");
+    setBusy(true);
+
+    const { error } = await supabase
+      .from("machines")
+      .update({ machine_type: machineType || null })
+      .eq("id", row.id);
+
+    setBusy(false);
+    if (error) {
+      setMsg("Fehler: " + error.message);
+      return;
+    }
+
+    setMsg("✅ Maschinentyp gespeichert");
     await loadAll();
   }
 
@@ -436,23 +449,23 @@ setDrivers(driverData);
           </div>
         </div>
 
-<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-  <Link href="/admin/control">
-    <button className="topBtn">Kontrolle</button>
-  </Link>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Link href="/admin/control">
+            <button className="topBtn">Kontrolle</button>
+          </Link>
 
-  <Link href="/admin/export">
-    <button className="topBtn">Export</button>
-  </Link>
+          <Link href="/admin/export">
+            <button className="topBtn">Export</button>
+          </Link>
 
-  <Link href="/app">
-    <button className="topBtn">Zur Übersicht</button>
-  </Link>
+          <Link href="/app">
+            <button className="topBtn">Zur Übersicht</button>
+          </Link>
 
-  <button onClick={loadAll} disabled={busy} className="topBtn">
-    {busy ? "…" : "Neu laden"}
-  </button>
-</div>
+          <button onClick={loadAll} disabled={busy} className="topBtn">
+            {busy ? "…" : "Neu laden"}
+          </button>
+        </div>
       </header>
 
       <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
@@ -651,6 +664,14 @@ setDrivers(driverData);
                 className="input"
               />
 
+              <select value={newMachineType} onChange={(e) => setNewMachineType(e.target.value)} className="input">
+                <option value="">Typ…</option>
+                <option value="harvester">Harvester</option>
+                <option value="forwarder">Forwarder</option>
+                <option value="motormanuel">Motormanuel</option>
+                <option value="sonstiges">Sonstiges</option>
+              </select>
+
               <button type="button" onClick={() => add("machines")} disabled={busy} className="primaryBtn">
                 Hinzufügen
               </button>
@@ -663,10 +684,24 @@ setDrivers(driverData);
                     <b>{m.name}</b> {!m.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
                     <div style={{ opacity: 0.8, marginTop: 4, fontSize: 13 }}>
                       Stundenpreis: <b>{m.hourly_rate ?? <span style={{ opacity: 0.7 }}>(leer)</span>} €/h</b>
+                      {" · "}Typ: <b>{m.machine_type || <span style={{ opacity: 0.7 }}>(leer)</span>}</b>
                     </div>
                   </div>
 
                   <div className="actions">
+                    <select
+                      value={m.machine_type ?? ""}
+                      onChange={(e) => setMachineType(m, e.target.value)}
+                      disabled={busy}
+                      className="smallSelect"
+                    >
+                      <option value="">Typ…</option>
+                      <option value="harvester">Harvester</option>
+                      <option value="forwarder">Forwarder</option>
+                      <option value="motormanuel">Motormanuel</option>
+                      <option value="sonstiges">Sonstiges</option>
+                    </select>
+
                     <button type="button" onClick={() => setMachineHourlyRate(m)} disabled={busy} className="smallBtn">
                       Preis
                     </button>
@@ -771,7 +806,7 @@ setDrivers(driverData);
         }
 
         .input {
-          flex: 1 1 260px;
+          flex: 1 1 220px;
           padding: 12px;
           font-size: 16px;
           border-radius: 10px;
@@ -785,7 +820,7 @@ setDrivers(driverData);
           border-radius: 10px;
           border: 1px solid #ddd;
           background: #fff;
-          min-width: 220px;
+          min-width: 170px;
         }
 
         .list {
