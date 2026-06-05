@@ -12,6 +12,12 @@ type DriverRow = {
   is_active: boolean | null;
 };
 
+type OptionRow = {
+  id: string;
+  name: string;
+  is_active?: boolean | null;
+};
+
 type DayRow = {
   id: string;
   user_id: string;
@@ -49,6 +55,22 @@ type ItemRow = {
 type ControlDay = DayRow & {
   driverName: string;
   items: ItemRow[];
+};
+
+type DisplayDay = {
+  date: string;
+  day: ControlDay | null;
+};
+
+type DriverWeekGroup = {
+  driver: DriverRow;
+  driverName: string;
+  days: DisplayDay[];
+};
+
+type WeekGroup = {
+  key: string;
+  drivers: DriverWeekGroup[];
 };
 
 type NumField =
@@ -101,6 +123,12 @@ function fmtDE(dateISO: string) {
   return `${d}.${m}.${y}`;
 }
 
+function weekdayDE(dateISO: string) {
+  const [y, m, d] = dateISO.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  return date.toLocaleDateString("de-DE", { weekday: "short", timeZone: "UTC" });
+}
+
 function isoWeekKey(dateISO: string) {
   const [y, m, d] = dateISO.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
@@ -115,6 +143,24 @@ function isoWeekKey(dateISO: string) {
 
   const week = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
   return `${isoYear}-KW${String(week).padStart(2, "0")}`;
+}
+
+function listDatesInRange(from: string, to: string) {
+  const result: string[] = [];
+  if (!from || !to) return result;
+
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
+
+  const cur = new Date(start);
+  while (cur <= end) {
+    result.push(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`);
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return result;
 }
 
 function toEditValue(v: number | null | undefined) {
@@ -171,6 +217,10 @@ function sumWorkedHours(items: ItemRow[]) {
   }, 0);
 }
 
+function driverLabel(d: DriverRow) {
+  return d.full_name?.trim() || d.username?.trim() || d.user_id;
+}
+
 export default function AdminControlPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
@@ -181,10 +231,14 @@ export default function AdminControlPage() {
   const [onlyUnchecked, setOnlyUnchecked] = useState(true);
 
   const [drivers, setDrivers] = useState<DriverRow[]>([]);
+  const [objects, setObjects] = useState<OptionRow[]>([]);
+  const [machines, setMachines] = useState<OptionRow[]>([]);
   const [days, setDays] = useState<ControlDay[]>([]);
 
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
+  const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string }>>({});
   const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
+  const [dayFlags, setDayFlags] = useState<Record<string, { is_urlaub: boolean; is_wetter: boolean }>>({});
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -211,10 +265,11 @@ export default function AdminControlPage() {
     setBusy(true);
     setMsg("Lade...");
 
-    const dRes = await supabase
-      .from("driver_profiles")
-      .select("user_id,username,full_name,is_active")
-      .order("full_name", { ascending: true });
+    const [dRes, objRes, machRes] = await Promise.all([
+      supabase.from("driver_profiles").select("user_id,username,full_name,is_active").order("full_name", { ascending: true }),
+      supabase.from("objects").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
+      supabase.from("machines").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
+    ]);
 
     if (dRes.error) {
       setBusy(false);
@@ -222,12 +277,26 @@ export default function AdminControlPage() {
       return;
     }
 
+    if (objRes.error) {
+      setBusy(false);
+      setMsg("Fehler Objekte laden: " + objRes.error.message);
+      return;
+    }
+
+    if (machRes.error) {
+      setBusy(false);
+      setMsg("Fehler Maschinen laden: " + machRes.error.message);
+      return;
+    }
+
     const driverRows = (((dRes.data as any[]) ?? []) as DriverRow[]).sort(sortByLastname);
     setDrivers(driverRows);
+    setObjects(((objRes.data as any[]) ?? []) as OptionRow[]);
+    setMachines(((machRes.data as any[]) ?? []) as OptionRow[]);
 
     const driverMap = new Map<string, string>();
     for (const d of driverRows) {
-      driverMap.set(d.user_id, d.full_name?.trim() || d.username?.trim() || d.user_id);
+      driverMap.set(d.user_id, driverLabel(d));
     }
 
     let q = supabase
@@ -238,7 +307,6 @@ export default function AdminControlPage() {
       .order("date", { ascending: false });
 
     if (selectedDriver) q = q.eq("user_id", selectedDriver);
-    if (onlyUnchecked) q = q.or("is_controlled.is.null,is_controlled.eq.false");
 
     const dayRes = await q;
 
@@ -284,17 +352,34 @@ export default function AdminControlPage() {
     }));
 
     const nextEdits: Record<string, Partial<Record<NumField, string>>> = {};
+    const nextTextEdits: Record<string, { objekt: string; maschine: string }> = {};
+
     for (const item of itemRows) {
       nextEdits[item.id] = {};
       for (const f of NUM_FIELDS) nextEdits[item.id]![f] = toEditValue(item[f]);
+
+      nextTextEdits[item.id] = {
+        objekt: item.objekt ?? "",
+        maschine: item.maschine ?? "",
+      };
     }
 
     const nextComments: Record<string, string> = {};
-    for (const day of finalDays) nextComments[day.id] = day.kommentar ?? "";
+    const nextFlags: Record<string, { is_urlaub: boolean; is_wetter: boolean }> = {};
+
+    for (const day of finalDays) {
+      nextComments[day.id] = day.kommentar ?? "";
+      nextFlags[day.id] = {
+        is_urlaub: !!day.is_urlaub,
+        is_wetter: !!day.is_wetter,
+      };
+    }
 
     setDays(finalDays);
     setEdits(nextEdits);
+    setItemTextEdits(nextTextEdits);
     setCommentEdits(nextComments);
+    setDayFlags(nextFlags);
     setMsg("");
     setBusy(false);
   }
@@ -309,17 +394,83 @@ export default function AdminControlPage() {
     }));
   }
 
+  function updateItemText(itemId: string, field: "objekt" | "maschine", value: string) {
+    setItemTextEdits((prev) => ({
+      ...prev,
+      [itemId]: {
+        ...(prev[itemId] ?? { objekt: "", maschine: "" }),
+        [field]: value,
+      },
+    }));
+  }
+
+  function updateDayFlag(dayId: string, field: "is_urlaub" | "is_wetter", checked: boolean) {
+    setDayFlags((prev) => {
+      const current = prev[dayId] ?? { is_urlaub: false, is_wetter: false };
+
+      if (field === "is_urlaub") {
+        return {
+          ...prev,
+          [dayId]: {
+            is_urlaub: checked,
+            is_wetter: checked ? false : current.is_wetter,
+          },
+        };
+      }
+
+      return {
+        ...prev,
+        [dayId]: {
+          is_urlaub: checked ? false : current.is_urlaub,
+          is_wetter: checked,
+        },
+      };
+    });
+  }
+
   function getEdit(item: ItemRow, field: NumField) {
     return edits[item.id]?.[field] ?? toEditValue(item[field]);
   }
 
+  function getItemText(item: ItemRow, field: "objekt" | "maschine") {
+    return itemTextEdits[item.id]?.[field] ?? item[field] ?? "";
+  }
+
   async function saveItem(item: ItemRow) {
     const e = edits[item.id] ?? {};
-    const payload: Record<string, number | null> = {};
+    const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "" };
+
+    const payload: Record<string, any> = {
+      objekt: t.objekt?.trim() || null,
+      maschine: t.maschine?.trim() || null,
+    };
 
     for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? "");
 
     const { error } = await supabase.from("work_items").update(payload).eq("id", item.id);
+    if (error) throw new Error(error.message);
+  }
+
+  async function saveDayInternal(day: ControlDay, markControlled: boolean) {
+    for (const item of day.items) await saveItem(item);
+
+    const flags = dayFlags[day.id] ?? {
+      is_urlaub: !!day.is_urlaub,
+      is_wetter: !!day.is_wetter,
+    };
+
+    const payload: Record<string, any> = {
+      kommentar: commentEdits[day.id]?.trim() || null,
+      is_urlaub: !!flags.is_urlaub,
+      is_wetter: !!flags.is_wetter,
+    };
+
+    if (markControlled) {
+      payload.is_controlled = true;
+      payload.controlled_at = new Date().toISOString();
+    }
+
+    const { error } = await supabase.from("workdays").update(payload).eq("id", day.id);
     if (error) throw new Error(error.message);
   }
 
@@ -330,20 +481,35 @@ export default function AdminControlPage() {
     setMsg("Speichere Kontrolle...");
 
     try {
-      for (const item of day.items) await saveItem(item);
-
-      const { error } = await supabase
-        .from("workdays")
-        .update({
-          kommentar: commentEdits[day.id]?.trim() || null,
-          is_controlled: true,
-          controlled_at: new Date().toISOString(),
-        })
-        .eq("id", day.id);
-
-      if (error) throw new Error(error.message);
-
+      await saveDayInternal(day, true);
       setMsg("✅ Gespeichert und als kontrolliert markiert.");
+      await loadData();
+    } catch (e: any) {
+      setMsg("Fehler: " + (e?.message || String(e)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveWeekAndMarkControlled(group: DriverWeekGroup, weekKey: string) {
+    const existingDays = group.days.map((x) => x.day).filter(Boolean) as ControlDay[];
+
+    if (existingDays.length === 0) {
+      setMsg("Keine vorhandenen Tage in dieser Woche zum Speichern.");
+      return;
+    }
+
+    if (!confirm(`${weekKey} für ${group.driverName} speichern und als kontrolliert markieren?\n\nVorhandene Tage: ${existingDays.length}`)) return;
+
+    setBusy(true);
+    setMsg("Speichere Woche...");
+
+    try {
+      for (const day of existingDays) {
+        await saveDayInternal(day, true);
+      }
+
+      setMsg(`✅ ${weekKey} für ${group.driverName} gespeichert und kontrolliert.`);
       await loadData();
     } catch (e: any) {
       setMsg("Fehler: " + (e?.message || String(e)));
@@ -377,34 +543,64 @@ export default function AdminControlPage() {
     setBusy(false);
   }
 
-  const grouped = useMemo(() => {
-    const weeks = new Map<string, Map<string, ControlDay[]>>();
+  const grouped = useMemo<WeekGroup[]>(() => {
+    const allDates = listDatesInRange(from, to);
+    const weekDateMap = new Map<string, string[]>();
 
-    for (const d of days) {
-      const weekKey = isoWeekKey(d.date);
-      if (!weeks.has(weekKey)) weeks.set(weekKey, new Map());
-
-      const driverKey = d.driverName || d.user_id;
-      const driverMap = weeks.get(weekKey)!;
-      const arr = driverMap.get(driverKey) ?? [];
-      arr.push(d);
-      driverMap.set(driverKey, arr);
+    for (const date of allDates) {
+      const key = isoWeekKey(date);
+      const arr = weekDateMap.get(key) ?? [];
+      arr.push(date);
+      weekDateMap.set(key, arr);
     }
 
-    const weekKeys = Array.from(weeks.keys()).sort((a, b) => (a < b ? 1 : -1));
+    const actualByDriverDate = new Map<string, ControlDay>();
+    for (const d of days) {
+      actualByDriverDate.set(`${d.user_id}__${d.date}`, d);
+    }
 
-    return weekKeys.map((weekKey) => {
-      const driverMap = weeks.get(weekKey)!;
-      const driverGroups = Array.from(driverMap.entries())
-        .sort(([a], [b]) => a.localeCompare(b, "de", { sensitivity: "base" }))
-        .map(([driverName, driverDays]) => ({
-          driverName,
-          days: driverDays.sort((a, b) => (a.date < b.date ? 1 : -1)),
+    const relevantDrivers = (selectedDriver ? drivers.filter((d) => d.user_id === selectedDriver) : drivers).filter((d) => d.is_active !== false);
+
+    const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? 1 : -1));
+
+    const result: WeekGroup[] = [];
+
+    for (const weekKey of weekKeys) {
+      const weekDates = (weekDateMap.get(weekKey) ?? []).sort((a, b) => a.localeCompare(b));
+      const driverGroups: DriverWeekGroup[] = [];
+
+      for (const driver of relevantDrivers) {
+        const displayDays: DisplayDay[] = weekDates.map((date) => ({
+          date,
+          day: actualByDriverDate.get(`${driver.user_id}__${date}`) ?? null,
         }));
 
-      return { key: weekKey, drivers: driverGroups };
-    });
-  }, [days]);
+        const hasAnyActualDay = displayDays.some((x) => !!x.day);
+        const hasUncheckedDay = displayDays.some((x) => x.day && !x.day.is_controlled);
+
+        if (onlyUnchecked) {
+          if (!hasUncheckedDay) continue;
+        } else {
+          if (!hasAnyActualDay && !selectedDriver) continue;
+        }
+
+        driverGroups.push({
+          driver,
+          driverName: driverLabel(driver),
+          days: displayDays,
+        });
+      }
+
+      if (driverGroups.length > 0) {
+        result.push({
+          key: weekKey,
+          drivers: driverGroups,
+        });
+      }
+    }
+
+    return result;
+  }, [days, drivers, from, to, selectedDriver, onlyUnchecked]);
 
   if (admin === null) {
     return (
@@ -472,7 +668,7 @@ export default function AdminControlPage() {
               <option value="">Alle Fahrer</option>
               {drivers.map((d) => (
                 <option key={d.user_id} value={d.user_id}>
-                  {d.full_name || d.username || d.user_id}
+                  {driverLabel(d)}
                 </option>
               ))}
             </select>
@@ -480,7 +676,7 @@ export default function AdminControlPage() {
 
           <label className="checkBox">
             <input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />
-            Nur nicht kontrollierte Tage
+            Nur Wochen mit offenen Tagen
           </label>
 
           <button onClick={loadData} disabled={busy} className="btnPrimary">
@@ -500,109 +696,174 @@ export default function AdminControlPage() {
             </summary>
 
             <div className="drivers">
-              {w.drivers.map((driverGroup) => (
-                <details key={driverGroup.driverName} className="driverCard" open>
-                  <summary className="driverSummary">
-                    <span className="plus">＋</span>
-                    <span>{driverGroup.driverName}</span>
-                  </summary>
+              {w.drivers.map((driverGroup) => {
+                const existingDays = driverGroup.days.filter((x) => !!x.day).length;
+                const uncheckedDays = driverGroup.days.filter((x) => x.day && !x.day.is_controlled).length;
 
-                  <div className="days">
-                    {driverGroup.days.map((d) => {
-                      const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
-                      const geleistet = sumWorkedHours(d.items);
-                      const diff = arbeitszeit === null ? null : geleistet - arbeitszeit;
+                return (
+                  <details key={`${w.key}-${driverGroup.driver.user_id}`} className="driverCard" open>
+                    <summary className="driverSummary">
+                      <span className="plus">＋</span>
+                      <span>{driverGroup.driverName}</span>
+                      <span className="driverMeta">
+                        {existingDays} Einträge · {uncheckedDays} offen
+                      </span>
+                    </summary>
 
-                      return (
-                        <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"}>
-                          <summary className="daySummary">
-                            <div>
-                              <b>{fmtDE(d.date)}</b>
-                              {d.is_urlaub && <span className="badge green">Urlaub</span>}
-                              {d.is_wetter && <span className="badge blue">Wetter</span>}
-                              {d.is_controlled && <span className="badge done">Kontrolliert</span>}
+                    <div className="weekActions">
+                      <button type="button" onClick={() => saveWeekAndMarkControlled(driverGroup, w.key)} disabled={busy} className="btnPrimary">
+                        Woche speichern + kontrolliert
+                      </button>
+                    </div>
+
+                    <div className="days">
+                      {driverGroup.days.map((display) => {
+                        const d = display.day;
+
+                        if (!d) {
+                          return (
+                            <div key={display.date} className="missingDay">
+                              <b>
+                                {weekdayDE(display.date)} {fmtDE(display.date)}
+                              </b>
+                              <span>Kein Eintrag</span>
                             </div>
-                          </summary>
+                          );
+                        }
 
-                          <div className="compareBox">
-                            <div>
-                              <b>Arbeitszeit:</b>{" "}
-                              {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
-                              <span className="small">
-                                ({d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"})
-                              </span>
-                            </div>
-                            <div>
-                              <b>Geleistete Stunden:</b> {geleistet.toFixed(2)} h
-                              <span className="small"> ohne Fahrtzeit</span>
-                            </div>
-                            <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
-                              <b>Differenz:</b> {diff === null ? "-" : `${diff.toFixed(2)} h`}
-                            </div>
-                          </div>
+                        const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
+                        const geleistet = sumWorkedHours(d.items);
+                        const diff = arbeitszeit === null ? null : geleistet - arbeitszeit;
+                        const flags = dayFlags[d.id] ?? { is_urlaub: !!d.is_urlaub, is_wetter: !!d.is_wetter };
 
-                          <label className="commentEdit">
-                            Tageskommentar
-                            <textarea
-                              value={commentEdits[d.id] ?? ""}
-                              onChange={(e) =>
-                                setCommentEdits((prev) => ({
-                                  ...prev,
-                                  [d.id]: e.target.value,
-                                }))
-                              }
-                              placeholder="Tageskommentar..."
-                            />
-                          </label>
+                        return (
+                          <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"}>
+                            <summary className="daySummary">
+                              <div>
+                                <b>
+                                  {weekdayDE(d.date)} {fmtDE(d.date)}
+                                </b>
+                                {flags.is_urlaub && <span className="badge green">Urlaub</span>}
+                                {flags.is_wetter && <span className="badge blue">Wetter</span>}
+                                {d.is_controlled && <span className="badge done">Kontrolliert</span>}
+                              </div>
+                            </summary>
 
-                          {d.items.length === 0 ? (
-                            <div className="empty">Keine Einsätze</div>
-                          ) : (
-                            <div className="items">
-                              {d.items.map((it, itemIdx) => (
-                                <div key={it.id} className="itemRow">
-                                  <div className="itemHead">
-                                    <div>
-                                      <b>Einsatz {itemIdx + 1}</b> · {it.objekt || "Ohne Objekt"} · {it.maschine || "Ohne Maschine"}
+                            <div className="compareBox">
+                              <div>
+                                <b>Arbeitszeit:</b> {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
+                                <span className="small">
+                                  ({d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"})
+                                </span>
+                              </div>
+                              <div>
+                                <b>Geleistete Stunden:</b> {geleistet.toFixed(2)} h
+                                <span className="small"> ohne Fahrtzeit</span>
+                              </div>
+                              <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
+                                <b>Differenz:</b> {diff === null ? "-" : `${diff.toFixed(2)} h`}
+                              </div>
+                            </div>
+
+                            <div className="flagsRow">
+                              <label className="flagBox">
+                                <input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />
+                                Urlaub
+                              </label>
+
+                              <label className="flagBox">
+                                <input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />
+                                Wetter
+                              </label>
+                            </div>
+
+                            <label className="commentEdit">
+                              Tageskommentar
+                              <textarea
+                                value={commentEdits[d.id] ?? ""}
+                                onChange={(e) =>
+                                  setCommentEdits((prev) => ({
+                                    ...prev,
+                                    [d.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Tageskommentar..."
+                              />
+                            </label>
+
+                            {d.items.length === 0 ? (
+                              <div className="empty">Keine Einsätze</div>
+                            ) : (
+                              <div className="items">
+                                {d.items.map((it, itemIdx) => (
+                                  <div key={it.id} className="itemRow">
+                                    <div className="itemHead">
+                                      <b>Einsatz {itemIdx + 1}</b>
+                                    </div>
+
+                                    <div className="selectGrid">
+                                      <label className="selectField">
+                                        Objekt
+                                        <select value={getItemText(it, "objekt")} onChange={(e) => updateItemText(it.id, "objekt", e.target.value)}>
+                                          <option value="">Ohne Objekt</option>
+                                          {objects.map((o) => (
+                                            <option key={o.id} value={o.name}>
+                                              {o.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+
+                                      <label className="selectField">
+                                        Maschine
+                                        <select value={getItemText(it, "maschine")} onChange={(e) => updateItemText(it.id, "maschine", e.target.value)}>
+                                          <option value="">Ohne Maschine</option>
+                                          {machines.map((m) => (
+                                            <option key={m.id} value={m.name}>
+                                              {m.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    </div>
+
+                                    <div className="editGrid">
+                                      <NumberInput label="Fahrtzeit min" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
+                                      <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
+                                      <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
+                                      <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
+                                      <NumberInput label="Unterhalt" value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
+                                      <NumberInput label="Reparatur" value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
+                                      <NumberInput label="Motormanuel" value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
+                                      <NumberInput label="Umsetzen" value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
+                                      <NumberInput label="Sonstiges" value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
+                                      <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
+                                      <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
+                                      <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
                                     </div>
                                   </div>
-
-                                  <div className="editGrid">
-                                    <NumberInput label="Fahrtzeit min" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
-                                    <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
-                                    <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
-                                    <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
-                                    <NumberInput label="Unterhalt" value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
-                                    <NumberInput label="Reparatur" value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
-                                    <NumberInput label="Motormanuel" value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
-                                    <NumberInput label="Umsetzen" value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
-                                    <NumberInput label="Sonstiges" value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
-                                    <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
-                                    <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
-                                    <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          <div className="dayActions">
-                            <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
-                              Speichern + kontrolliert
-                            </button>
-
-                            {d.is_controlled && (
-                              <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">
-                                Wieder öffnen
-                              </button>
+                                ))}
+                              </div>
                             )}
-                          </div>
-                        </details>
-                      );
-                    })}
-                  </div>
-                </details>
-              ))}
+
+                            <div className="dayActions">
+                              <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
+                                Tag speichern + kontrolliert
+                              </button>
+
+                              {d.is_controlled && (
+                                <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">
+                                  Wieder öffnen
+                                </button>
+                              )}
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+                  </details>
+                );
+              })}
             </div>
           </details>
         ))}
@@ -625,7 +886,7 @@ function NumberInput({ label, value, onChange }: { label: string; value: string;
 }
 
 const baseStyles = `
-.wrap{max-width:980px;margin:24px auto;padding:12px}
+.wrap{max-width:1100px;margin:24px auto;padding:12px}
 .head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
 .h1{margin:0;font-size:36px;line-height:1.1}
 .h2{margin:0 0 10px 0;font-size:22px}
@@ -649,8 +910,11 @@ const baseStyles = `
 details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
 .drivers,.days{display:grid;gap:10px;margin-top:12px}
 .driverCard{background:#fcfcfc}
+.driverMeta{margin-left:auto;font-size:13px;opacity:.7}
+.weekActions{margin-top:12px;display:flex;justify-content:flex-end}
 .dayCard{padding:12px}
 .dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
+.missingDay{border:1px dashed #ddd;border-radius:14px;padding:12px;background:#fafafa;display:flex;justify-content:space-between;gap:10px;opacity:.78}
 .badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:900}
 .badge.green{background:#ecfdf3;border:1px solid #c7f2d5}
 .badge.blue{background:#eef6ff;border:1px solid #cfe4ff}
@@ -659,11 +923,16 @@ details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.
 .diffWarn{color:crimson;font-weight:900}
 .diffOk{color:green;font-weight:900}
 .small{font-size:12px;opacity:.72;margin-left:4px}
+.flagsRow{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.flagBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:12px;padding:10px 12px;background:#fff;font-weight:900}
 .commentEdit{display:block;margin-top:10px;font-weight:800}
 .commentEdit textarea{width:100%;min-height:70px;margin-top:6px;padding:10px;border:1px solid #ddd;border-radius:12px;font-size:15px;box-sizing:border-box}
 .items{display:grid;gap:8px;margin-top:10px}
 .itemRow{border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
 .itemHead{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.selectField{font-size:12px;font-weight:900}
+.selectField select{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;font-size:15px;box-sizing:border-box;background:#fff}
 .editGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
 .numField{font-size:12px;font-weight:800;opacity:.95}
 .numField input{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;font-size:15px;box-sizing:border-box;background:#fff}
@@ -675,7 +944,10 @@ details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.
   .filterGrid{grid-template-columns:1fr}
   .daySummary{align-items:flex-start;flex-direction:column}
   .editGrid{grid-template-columns:1fr 1fr}
+  .selectGrid{grid-template-columns:1fr}
   .compareBox{grid-template-columns:1fr}
-  .dayActions .btn,.dayActions .btnPrimary{width:100%}
+  .dayActions .btn,.dayActions .btnPrimary,.weekActions .btnPrimary{width:100%}
+  .driverSummary{flex-wrap:wrap}
+  .driverMeta{width:100%;margin-left:32px}
 }
 `;
