@@ -108,6 +108,17 @@ async function isAdmin() {
   return data === true;
 }
 
+function round1(v: number | null | undefined) {
+  if (v === null || v === undefined) return null;
+  return Math.round(v * 10) / 10;
+}
+
+function format1(v: number | null | undefined) {
+  const r = round1(v);
+  if (r === null) return "-";
+  return r.toFixed(1);
+}
+
 function todayISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -163,15 +174,17 @@ function listDatesInRange(from: string, to: string) {
 }
 
 function toEditValue(v: number | null | undefined) {
-  if (v === null || v === undefined) return "";
-  return String(v).replace(".", ",");
+  const r = round1(v);
+  if (r === null) return "";
+  return String(r).replace(".", ",");
 }
 
 function toNumOrNull(v: string) {
   const t = String(v ?? "").trim();
   if (!t) return null;
   const n = Number(t.replace(",", "."));
-  return Number.isFinite(n) ? n : null;
+  if (!Number.isFinite(n)) return null;
+  return round1(n);
 }
 
 function sortByLastname(a: DriverRow, b: DriverRow) {
@@ -197,21 +210,7 @@ function timeDiffHours(start: string | null, end: string | null) {
   let endMin = eh * 60 + em;
   if (endMin < startMin) endMin += 24 * 60;
 
-  return (endMin - startMin) / 60;
-}
-
-function sumWorkedHours(items: ItemRow[]) {
-  return items.reduce((sum, it) => {
-    return (
-      sum +
-      (it.maschinenstunden_h ?? 0) +
-      (it.unterhalt_h ?? 0) +
-      (it.reparatur_h ?? 0) +
-      (it.motormanuel_h ?? 0) +
-      (it.umsetzen_h ?? 0) +
-      (it.sonstiges_h ?? 0)
-    );
-  }, 0);
+  return round1((endMin - startMin) / 60);
 }
 
 function driverLabel(d: DriverRow) {
@@ -440,6 +439,90 @@ export default function AdminControlPage() {
     }));
   }
 
+  function sumWorkedHoursLive(items: ItemRow[]) {
+    const total = items.reduce((sum, it) => {
+      return (
+        sum +
+        (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0) +
+        (toNumOrNull(getEdit(it, "unterhalt_h")) ?? 0) +
+        (toNumOrNull(getEdit(it, "reparatur_h")) ?? 0) +
+        (toNumOrNull(getEdit(it, "motormanuel_h")) ?? 0) +
+        (toNumOrNull(getEdit(it, "umsetzen_h")) ?? 0) +
+        (toNumOrNull(getEdit(it, "sonstiges_h")) ?? 0)
+      );
+    }, 0);
+
+    return round1(total) ?? 0;
+  }
+
+  async function createDayAndItem(driver: DriverRow, date: string) {
+    const defaultObject = objects[0]?.name ?? "";
+    const defaultMachine = machines[0]?.name ?? "";
+
+    if (!defaultObject) {
+      setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+      return;
+    }
+
+    if (!defaultMachine) {
+      setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
+      return;
+    }
+
+    setBusy(true);
+    setMsg("Tag und Einsatz werden angelegt...");
+
+    try {
+      const { data: dayData, error: dayErr } = await supabase
+        .from("workdays")
+        .insert({
+          user_id: driver.user_id,
+          date,
+          arbeitsbeginn: null,
+          arbeitsende: null,
+          kommentar: null,
+          is_urlaub: false,
+          is_wetter: false,
+          is_controlled: false,
+          controlled_at: null,
+        })
+        .select("id")
+        .single();
+
+      if (dayErr) throw new Error(dayErr.message);
+
+      const { error: itemErr } = await supabase.from("work_items").insert({
+        workday_id: dayData.id,
+        objekt: defaultObject,
+        maschine: defaultMachine,
+        fahrtzeit_min: null,
+        mas_start: null,
+        mas_end: null,
+        maschinenstunden_h: null,
+        unterhalt_h: null,
+        reparatur_h: null,
+        motormanuel_h: null,
+        umsetzen_h: null,
+        sonstiges_h: null,
+        diesel_l: null,
+        adblue_l: null,
+        kommentar: null,
+        twinch_used: false,
+        twinch_h: null,
+      });
+
+      if (itemErr) throw new Error(itemErr.message);
+
+      setDayOpen(dayData.id, true);
+      setMsg("✅ Tag und Einsatz angelegt.");
+      await loadData();
+    } catch (e: any) {
+      setMsg("Fehler: " + (e?.message || String(e)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function addItemToDay(day: ControlDay) {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
@@ -511,7 +594,7 @@ export default function AdminControlPage() {
       maschine: t.maschine?.trim() || null,
     };
 
-    for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? "");
+    for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? toEditValue(item[f]));
 
     const { error } = await supabase.from("work_items").update(payload).eq("id", item.id);
     if (error) throw new Error(error.message);
@@ -795,17 +878,23 @@ export default function AdminControlPage() {
                         if (!d) {
                           return (
                             <div key={display.date} className="missingDay">
-                              <b>
-                                {weekdayDE(display.date)} {fmtDE(display.date)}
-                              </b>
-                              <span>Kein Eintrag</span>
+                              <div>
+                                <b>
+                                  {weekdayDE(display.date)} {fmtDE(display.date)}
+                                </b>
+                                <div style={{ opacity: 0.7, fontSize: 12 }}>Kein Eintrag</div>
+                              </div>
+
+                              <button type="button" onClick={() => createDayAndItem(driverGroup.driver, display.date)} disabled={busy} className="btn">
+                                + Eintrag
+                              </button>
                             </div>
                           );
                         }
 
                         const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
-                        const geleistet = sumWorkedHours(d.items);
-                        const diff = arbeitszeit === null ? null : geleistet - arbeitszeit;
+                        const geleistet = sumWorkedHoursLive(d.items);
+                        const diff = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? { is_urlaub: !!d.is_urlaub, is_wetter: !!d.is_wetter };
                         const isOpen = openDays[d.id] ?? false;
 
@@ -822,8 +911,7 @@ export default function AdminControlPage() {
                                   {weekdayDE(d.date)} {fmtDE(d.date)}
                                 </b>
                                 <span className="miniStats">
-                                  AZ {arbeitszeit === null ? "-" : arbeitszeit.toFixed(1)}h · Leist. {geleistet.toFixed(1)}h · Diff{" "}
-                                  {diff === null ? "-" : diff.toFixed(1)}h
+                                  AZ {format1(arbeitszeit)}h · Leist. {format1(geleistet)}h · Diff {format1(diff)}h
                                 </span>
                               </div>
 
@@ -838,7 +926,7 @@ export default function AdminControlPage() {
                               <div>
                                 <b>Arbeitszeit</b>
                                 <br />
-                                {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
+                                {format1(arbeitszeit)} h{" "}
                                 <span className="small">
                                   {d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}
                                 </span>
@@ -846,12 +934,12 @@ export default function AdminControlPage() {
                               <div>
                                 <b>Geleistet</b>
                                 <br />
-                                {geleistet.toFixed(2)} h <span className="small">ohne Fahrt</span>
+                                {format1(geleistet)} h <span className="small">ohne Fahrt</span>
                               </div>
                               <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
                                 <b>Differenz</b>
                                 <br />
-                                {diff === null ? "-" : `${diff.toFixed(2)} h`}
+                                {format1(diff)} h
                               </div>
                             </div>
 
