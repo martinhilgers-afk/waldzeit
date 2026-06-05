@@ -27,6 +27,7 @@ type DayRow = {
   kommentar: string | null;
   is_urlaub: boolean | null;
   is_wetter: boolean | null;
+  is_feiertag: boolean | null;
   is_controlled: boolean | null;
   controlled_at: string | null;
 };
@@ -71,6 +72,12 @@ type DriverWeekGroup = {
 type WeekGroup = {
   key: string;
   drivers: DriverWeekGroup[];
+};
+
+type DayFlags = {
+  is_urlaub: boolean;
+  is_wetter: boolean;
+  is_feiertag: boolean;
 };
 
 type NumField =
@@ -217,6 +224,14 @@ function driverLabel(d: DriverRow) {
   return d.full_name?.trim() || d.username?.trim() || d.user_id;
 }
 
+function defaultFlags(day?: Partial<DayRow> | null): DayFlags {
+  return {
+    is_urlaub: !!day?.is_urlaub,
+    is_wetter: !!day?.is_wetter,
+    is_feiertag: !!day?.is_feiertag,
+  };
+}
+
 export default function AdminControlPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
@@ -236,7 +251,7 @@ export default function AdminControlPage() {
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
   const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string }>>({});
   const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
-  const [dayFlags, setDayFlags] = useState<Record<string, { is_urlaub: boolean; is_wetter: boolean }>>({});
+  const [dayFlags, setDayFlags] = useState<Record<string, DayFlags>>({});
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -297,7 +312,7 @@ export default function AdminControlPage() {
 
     let q = supabase
       .from("workdays")
-      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,is_controlled,controlled_at")
+      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,is_feiertag,is_controlled,controlled_at")
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: false });
@@ -361,14 +376,11 @@ export default function AdminControlPage() {
     }
 
     const nextComments: Record<string, string> = {};
-    const nextFlags: Record<string, { is_urlaub: boolean; is_wetter: boolean }> = {};
+    const nextFlags: Record<string, DayFlags> = {};
 
     for (const day of finalDays) {
       nextComments[day.id] = day.kommentar ?? "";
-      nextFlags[day.id] = {
-        is_urlaub: !!day.is_urlaub,
-        is_wetter: !!day.is_wetter,
-      };
+      nextFlags[day.id] = defaultFlags(day);
     }
 
     setDays(finalDays);
@@ -400,9 +412,13 @@ export default function AdminControlPage() {
     }));
   }
 
-  function updateDayFlag(dayId: string, field: "is_urlaub" | "is_wetter", checked: boolean) {
+  function updateDayFlag(dayId: string, field: "is_urlaub" | "is_wetter" | "is_feiertag", checked: boolean) {
     setDayFlags((prev) => {
-      const current = prev[dayId] ?? { is_urlaub: false, is_wetter: false };
+      const current = prev[dayId] ?? {
+        is_urlaub: false,
+        is_wetter: false,
+        is_feiertag: false,
+      };
 
       if (field === "is_urlaub") {
         return {
@@ -410,6 +426,18 @@ export default function AdminControlPage() {
           [dayId]: {
             is_urlaub: checked,
             is_wetter: checked ? false : current.is_wetter,
+            is_feiertag: checked ? false : current.is_feiertag,
+          },
+        };
+      }
+
+      if (field === "is_wetter") {
+        return {
+          ...prev,
+          [dayId]: {
+            is_urlaub: checked ? false : current.is_urlaub,
+            is_wetter: checked,
+            is_feiertag: checked ? false : current.is_feiertag,
           },
         };
       }
@@ -418,7 +446,8 @@ export default function AdminControlPage() {
         ...prev,
         [dayId]: {
           is_urlaub: checked ? false : current.is_urlaub,
-          is_wetter: checked,
+          is_wetter: checked ? false : current.is_wetter,
+          is_feiertag: checked,
         },
       };
     });
@@ -483,6 +512,7 @@ export default function AdminControlPage() {
           kommentar: null,
           is_urlaub: false,
           is_wetter: false,
+          is_feiertag: false,
           is_controlled: false,
           controlled_at: null,
         })
@@ -546,6 +576,7 @@ export default function AdminControlPage() {
         .update({
           is_urlaub: false,
           is_wetter: false,
+          is_feiertag: false,
           is_controlled: false,
           controlled_at: null,
         })
@@ -603,15 +634,13 @@ export default function AdminControlPage() {
   async function saveDayInternal(day: ControlDay, markControlled: boolean) {
     for (const item of day.items) await saveItem(item);
 
-    const flags = dayFlags[day.id] ?? {
-      is_urlaub: !!day.is_urlaub,
-      is_wetter: !!day.is_wetter,
-    };
+    const flags = dayFlags[day.id] ?? defaultFlags(day);
 
     const payload: Record<string, any> = {
       kommentar: commentEdits[day.id]?.trim() || null,
       is_urlaub: !!flags.is_urlaub,
       is_wetter: !!flags.is_wetter,
+      is_feiertag: !!flags.is_feiertag,
     };
 
     if (markControlled) {
@@ -699,7 +728,7 @@ export default function AdminControlPage() {
     setBusy(false);
   }
 
-  const grouped = useMemo<WeekGroup[]>(() => {
+  const grouped = useMemo<WeekGroup[]>((() => {
     const allDates = listDatesInRange(from, to);
     const weekDateMap = new Map<string, string[]>();
 
@@ -755,7 +784,7 @@ export default function AdminControlPage() {
     }
 
     return result;
-  }, [days, drivers, from, to, selectedDriver, onlyUnchecked]);
+  }) as any, [days, drivers, from, to, selectedDriver, onlyUnchecked]);
 
   if (admin === null) {
     return (
@@ -895,7 +924,7 @@ export default function AdminControlPage() {
                         const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
                         const geleistet = sumWorkedHoursLive(d.items);
                         const diff = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
-                        const flags = dayFlags[d.id] ?? { is_urlaub: !!d.is_urlaub, is_wetter: !!d.is_wetter };
+                        const flags = dayFlags[d.id] ?? defaultFlags(d);
                         const isOpen = openDays[d.id] ?? false;
 
                         return (
@@ -918,6 +947,7 @@ export default function AdminControlPage() {
                               <div className="badges">
                                 {flags.is_urlaub && <span className="badge green">Urlaub</span>}
                                 {flags.is_wetter && <span className="badge blue">Wetter</span>}
+                                {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
                                 {d.is_controlled && <span className="badge done">OK</span>}
                               </div>
                             </summary>
@@ -952,6 +982,11 @@ export default function AdminControlPage() {
                               <label className="flagBox">
                                 <input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />
                                 Wetter
+                              </label>
+
+                              <label className="flagBox">
+                                <input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />
+                                Feiertag
                               </label>
 
                               <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">
@@ -1105,6 +1140,7 @@ details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.
 .badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}
 .badge.green{background:#ecfdf3;border:1px solid #c7f2d5}
 .badge.blue{background:#eef6ff;border:1px solid #cfe4ff}
+.badge.holiday{background:#fff4cc;border:1px solid #f1d37a}
 .badge.done{background:#e2f0d9;border:1px solid #b6d7a8}
 .compareBox{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}
 .diffWarn{color:crimson;font-weight:900}
