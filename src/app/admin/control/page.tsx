@@ -151,7 +151,6 @@ function listDatesInRange(from: string, to: string) {
 
   const start = new Date(`${from}T00:00:00`);
   const end = new Date(`${to}T00:00:00`);
-
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
 
   const cur = new Date(start);
@@ -192,12 +191,10 @@ function timeDiffHours(start: string | null, end: string | null) {
 
   const [sh, sm] = start.split(":").map(Number);
   const [eh, em] = end.split(":").map(Number);
-
   if (![sh, sm, eh, em].every(Number.isFinite)) return null;
 
-  let startMin = sh * 60 + sm;
+  const startMin = sh * 60 + sm;
   let endMin = eh * 60 + em;
-
   if (endMin < startMin) endMin += 24 * 60;
 
   return (endMin - startMin) / 60;
@@ -234,6 +231,8 @@ export default function AdminControlPage() {
   const [objects, setObjects] = useState<OptionRow[]>([]);
   const [machines, setMachines] = useState<OptionRow[]>([]);
   const [days, setDays] = useState<ControlDay[]>([]);
+
+  const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
 
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
   const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string }>>({});
@@ -295,9 +294,7 @@ export default function AdminControlPage() {
     setMachines(((machRes.data as any[]) ?? []) as OptionRow[]);
 
     const driverMap = new Map<string, string>();
-    for (const d of driverRows) {
-      driverMap.set(d.user_id, driverLabel(d));
-    }
+    for (const d of driverRows) driverMap.set(d.user_id, driverLabel(d));
 
     let q = supabase
       .from("workdays")
@@ -436,6 +433,75 @@ export default function AdminControlPage() {
     return itemTextEdits[item.id]?.[field] ?? item[field] ?? "";
   }
 
+  function setDayOpen(dayId: string, open: boolean) {
+    setOpenDays((prev) => ({
+      ...prev,
+      [dayId]: open,
+    }));
+  }
+
+  async function addItemToDay(day: ControlDay) {
+    const defaultObject = objects[0]?.name ?? "";
+    const defaultMachine = machines[0]?.name ?? "";
+
+    if (!defaultObject) {
+      setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+      return;
+    }
+
+    if (!defaultMachine) {
+      setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
+      return;
+    }
+
+    setBusy(true);
+    setMsg("Einsatz wird hinzugefügt...");
+
+    try {
+      const { error: dayErr } = await supabase
+        .from("workdays")
+        .update({
+          is_urlaub: false,
+          is_wetter: false,
+          is_controlled: false,
+          controlled_at: null,
+        })
+        .eq("id", day.id);
+
+      if (dayErr) throw new Error(dayErr.message);
+
+      const { error: itemErr } = await supabase.from("work_items").insert({
+        workday_id: day.id,
+        objekt: defaultObject,
+        maschine: defaultMachine,
+        fahrtzeit_min: null,
+        mas_start: null,
+        mas_end: null,
+        maschinenstunden_h: null,
+        unterhalt_h: null,
+        reparatur_h: null,
+        motormanuel_h: null,
+        umsetzen_h: null,
+        sonstiges_h: null,
+        diesel_l: null,
+        adblue_l: null,
+        kommentar: null,
+        twinch_used: false,
+        twinch_h: null,
+      });
+
+      if (itemErr) throw new Error(itemErr.message);
+
+      setDayOpen(day.id, true);
+      setMsg("✅ Einsatz hinzugefügt. Bitte Objekt/Maschine prüfen.");
+      await loadData();
+    } catch (e: any) {
+      setMsg("Fehler: " + (e?.message || String(e)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveItem(item: ItemRow) {
     const e = edits[item.id] ?? {};
     const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "" };
@@ -482,6 +548,7 @@ export default function AdminControlPage() {
 
     try {
       await saveDayInternal(day, true);
+      setDayOpen(day.id, false);
       setMsg("✅ Gespeichert und als kontrolliert markiert.");
       await loadData();
     } catch (e: any) {
@@ -508,6 +575,12 @@ export default function AdminControlPage() {
       for (const day of existingDays) {
         await saveDayInternal(day, true);
       }
+
+      setOpenDays((prev) => {
+        const next = { ...prev };
+        for (const day of existingDays) next[day.id] = false;
+        return next;
+      });
 
       setMsg(`✅ ${weekKey} für ${group.driverName} gespeichert und kontrolliert.`);
       await loadData();
@@ -562,7 +635,6 @@ export default function AdminControlPage() {
     const relevantDrivers = (selectedDriver ? drivers.filter((d) => d.user_id === selectedDriver) : drivers).filter((d) => d.is_active !== false);
 
     const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? 1 : -1));
-
     const result: WeekGroup[] = [];
 
     for (const weekKey of weekKeys) {
@@ -648,7 +720,7 @@ export default function AdminControlPage() {
         </div>
       </header>
 
-      <section className="card">
+      <section className="card compactCard">
         <h2 className="h2">Filter</h2>
 
         <div className="filterGrid">
@@ -676,7 +748,7 @@ export default function AdminControlPage() {
 
           <label className="checkBox">
             <input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />
-            Nur Wochen mit offenen Tagen
+            Nur offen
           </label>
 
           <button onClick={loadData} disabled={busy} className="btnPrimary">
@@ -712,7 +784,7 @@ export default function AdminControlPage() {
 
                     <div className="weekActions">
                       <button type="button" onClick={() => saveWeekAndMarkControlled(driverGroup, w.key)} disabled={busy} className="btnPrimary">
-                        Woche speichern + kontrolliert
+                        Woche kontrolliert
                       </button>
                     </div>
 
@@ -735,33 +807,51 @@ export default function AdminControlPage() {
                         const geleistet = sumWorkedHours(d.items);
                         const diff = arbeitszeit === null ? null : geleistet - arbeitszeit;
                         const flags = dayFlags[d.id] ?? { is_urlaub: !!d.is_urlaub, is_wetter: !!d.is_wetter };
+                        const isOpen = openDays[d.id] ?? false;
 
                         return (
-                          <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"}>
+                          <details
+                            key={d.id}
+                            className={d.is_controlled ? "dayCard controlled" : "dayCard"}
+                            open={isOpen}
+                            onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}
+                          >
                             <summary className="daySummary">
-                              <div>
+                              <div className="dayMain">
                                 <b>
                                   {weekdayDE(d.date)} {fmtDE(d.date)}
                                 </b>
+                                <span className="miniStats">
+                                  AZ {arbeitszeit === null ? "-" : arbeitszeit.toFixed(1)}h · Leist. {geleistet.toFixed(1)}h · Diff{" "}
+                                  {diff === null ? "-" : diff.toFixed(1)}h
+                                </span>
+                              </div>
+
+                              <div className="badges">
                                 {flags.is_urlaub && <span className="badge green">Urlaub</span>}
                                 {flags.is_wetter && <span className="badge blue">Wetter</span>}
-                                {d.is_controlled && <span className="badge done">Kontrolliert</span>}
+                                {d.is_controlled && <span className="badge done">OK</span>}
                               </div>
                             </summary>
 
                             <div className="compareBox">
                               <div>
-                                <b>Arbeitszeit:</b> {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
+                                <b>Arbeitszeit</b>
+                                <br />
+                                {arbeitszeit === null ? "-" : `${arbeitszeit.toFixed(2)} h`}{" "}
                                 <span className="small">
-                                  ({d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"})
+                                  {d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}
                                 </span>
                               </div>
                               <div>
-                                <b>Geleistete Stunden:</b> {geleistet.toFixed(2)} h
-                                <span className="small"> ohne Fahrtzeit</span>
+                                <b>Geleistet</b>
+                                <br />
+                                {geleistet.toFixed(2)} h <span className="small">ohne Fahrt</span>
                               </div>
                               <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
-                                <b>Differenz:</b> {diff === null ? "-" : `${diff.toFixed(2)} h`}
+                                <b>Differenz</b>
+                                <br />
+                                {diff === null ? "-" : `${diff.toFixed(2)} h`}
                               </div>
                             </div>
 
@@ -775,6 +865,10 @@ export default function AdminControlPage() {
                                 <input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />
                                 Wetter
                               </label>
+
+                              <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">
+                                + Einsatz hinzufügen
+                              </button>
                             </div>
 
                             <label className="commentEdit">
@@ -828,15 +922,15 @@ export default function AdminControlPage() {
                                     </div>
 
                                     <div className="editGrid">
-                                      <NumberInput label="Fahrtzeit min" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
+                                      <NumberInput label="Fahrt" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
                                       <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
                                       <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
                                       <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
-                                      <NumberInput label="Unterhalt" value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
-                                      <NumberInput label="Reparatur" value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
-                                      <NumberInput label="Motormanuel" value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
-                                      <NumberInput label="Umsetzen" value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
-                                      <NumberInput label="Sonstiges" value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
+                                      <NumberInput label="Unterh." value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
+                                      <NumberInput label="Rep." value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
+                                      <NumberInput label="Motor." value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
+                                      <NumberInput label="Umsetz." value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
+                                      <NumberInput label="Sonst." value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
                                       <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
                                       <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
                                       <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
@@ -848,7 +942,7 @@ export default function AdminControlPage() {
 
                             <div className="dayActions">
                               <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
-                                Tag speichern + kontrolliert
+                                Speichern + kontrolliert
                               </button>
 
                               {d.is_controlled && (
@@ -886,68 +980,90 @@ function NumberInput({ label, value, onChange }: { label: string; value: string;
 }
 
 const baseStyles = `
-.wrap{max-width:1100px;margin:24px auto;padding:12px}
-.head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
-.h1{margin:0;font-size:36px;line-height:1.1}
-.h2{margin:0 0 10px 0;font-size:22px}
-.sub{opacity:.82;margin-top:6px}
-.topActions{display:flex;gap:10px;flex-wrap:wrap}
+.wrap{max-width:1080px;margin:18px auto;padding:8px}
+.head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.h1{margin:0;font-size:32px;line-height:1.1}
+.h2{margin:0 0 8px 0;font-size:20px}
+.sub{opacity:.82;margin-top:4px}
+.topActions{display:flex;gap:8px;flex-wrap:wrap}
 .btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:800;cursor:pointer}
-.btn{padding:10px 12px;border-radius:12px}
-.btnPrimary{padding:12px 14px;border-radius:12px;font-weight:900}
-.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
-.card{margin-top:14px}
-.filterGrid{display:grid;grid-template-columns:1fr 1fr 1.4fr 1.4fr auto;gap:10px;align-items:end}
-.field{display:block}
-.control{width:100%;padding:12px;font-size:16px;margin-top:6px;border-radius:12px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
-.checkBox{display:flex;gap:10px;align-items:center;border:1px solid #eee;border-radius:12px;padding:12px;font-weight:800;background:#fff}
-.msg{margin-top:10px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:12px;padding:10px}
+.btn{padding:8px 10px;border-radius:10px}
+.btnPrimary{padding:10px 12px;border-radius:10px;font-weight:900}
+.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:14px;padding:10px;background:#fff}
+.card{margin-top:10px}
+.compactCard{padding:10px}
+.filterGrid{display:grid;grid-template-columns:1fr 1fr 1.3fr auto auto;gap:8px;align-items:end}
+.field{display:block;font-size:13px;font-weight:800}
+.control{width:100%;padding:9px;font-size:15px;margin-top:4px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
+.checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}
+.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}
 .bad{color:crimson;font-weight:800}
-.weeks{display:grid;gap:12px;margin-top:14px}
-.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:10px;font-weight:900;list-style:none;user-select:none}
+.weeks{display:grid;gap:10px;margin-top:10px}
+.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}
 .weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}
-.plus{display:inline-block;transition:transform .12s ease;font-size:22px}
+.plus{display:inline-block;transition:transform .12s ease;font-size:19px}
 details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
-.drivers,.days{display:grid;gap:10px;margin-top:12px}
-.driverCard{background:#fcfcfc}
-.driverMeta{margin-left:auto;font-size:13px;opacity:.7}
-.weekActions{margin-top:12px;display:flex;justify-content:flex-end}
-.dayCard{padding:12px}
+.drivers,.days{display:grid;gap:8px;margin-top:8px}
+.driverCard{background:#fcfcfc;padding:9px}
+.driverMeta{margin-left:auto;font-size:12px;opacity:.7}
+.weekActions{margin-top:8px;display:flex;justify-content:flex-end}
+.dayCard{padding:8px}
 .dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
-.missingDay{border:1px dashed #ddd;border-radius:14px;padding:12px;background:#fafafa;display:flex;justify-content:space-between;gap:10px;opacity:.78}
-.badge{display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:900}
+.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.78;font-size:14px}
+.daySummary{justify-content:space-between}
+.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.miniStats{font-size:12px;opacity:.7;font-weight:800}
+.badges{display:flex;gap:5px;flex-wrap:wrap}
+.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}
 .badge.green{background:#ecfdf3;border:1px solid #c7f2d5}
 .badge.blue{background:#eef6ff;border:1px solid #cfe4ff}
 .badge.done{background:#e2f0d9;border:1px solid #b6d7a8}
-.compareBox{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px;border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
+.compareBox{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}
 .diffWarn{color:crimson;font-weight:900}
 .diffOk{color:green;font-weight:900}
-.small{font-size:12px;opacity:.72;margin-left:4px}
-.flagsRow{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
-.flagBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:12px;padding:10px 12px;background:#fff;font-weight:900}
-.commentEdit{display:block;margin-top:10px;font-weight:800}
-.commentEdit textarea{width:100%;min-height:70px;margin-top:6px;padding:10px;border:1px solid #ddd;border-radius:12px;font-size:15px;box-sizing:border-box}
-.items{display:grid;gap:8px;margin-top:10px}
-.itemRow{border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
-.itemHead{display:flex;justify-content:space-between;gap:10px;align-items:center}
-.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.selectField{font-size:12px;font-weight:900}
-.selectField select{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;font-size:15px;box-sizing:border-box;background:#fff}
-.editGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
-.numField{font-size:12px;font-weight:800;opacity:.95}
-.numField input{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;font-size:15px;box-sizing:border-box;background:#fff}
-.empty{margin-top:10px;opacity:.65}
-.dayActions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
-@media(max-width:700px){
-  .h1{font-size:30px}
+.small{font-size:11px;opacity:.72}
+.flagsRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.flagBox{display:flex;gap:6px;align-items:center;border:1px solid #eee;border-radius:10px;padding:7px 10px;background:#fff;font-weight:900;font-size:13px}
+.commentEdit{display:block;margin-top:8px;font-weight:800;font-size:13px}
+.commentEdit textarea{width:100%;min-height:54px;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:10px;font-size:14px;box-sizing:border-box}
+.items{display:grid;gap:7px;margin-top:8px}
+.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}
+.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}
+.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}
+.selectField{font-size:11px;font-weight:900}
+.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}
+.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}
+.numField{font-size:11px;font-weight:800;opacity:.95}
+.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}
+.empty{margin-top:8px;opacity:.65;font-size:13px}
+.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:800px){
+  .wrap{margin:10px auto;padding:6px}
+  .h1{font-size:26px}
   .head{flex-direction:column;align-items:stretch}
-  .filterGrid{grid-template-columns:1fr}
-  .daySummary{align-items:flex-start;flex-direction:column}
-  .editGrid{grid-template-columns:1fr 1fr}
-  .selectGrid{grid-template-columns:1fr}
-  .compareBox{grid-template-columns:1fr}
-  .dayActions .btn,.dayActions .btnPrimary,.weekActions .btnPrimary{width:100%}
+  .topActions{gap:6px}
+  .topActions .btn{flex:1}
+  .filterGrid{grid-template-columns:1fr 1fr}
+  .filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}
+  .weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}
   .driverSummary{flex-wrap:wrap}
-  .driverMeta{width:100%;margin-left:32px}
+  .driverMeta{width:100%;margin-left:28px}
+  .weekActions .btnPrimary{width:100%}
+  .daySummary{align-items:flex-start;gap:6px}
+  .dayMain{display:grid;gap:2px}
+  .miniStats{font-size:11px}
+  .badges{justify-content:flex-start}
+  .compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}
+  .selectGrid{grid-template-columns:1fr}
+  .editGrid{grid-template-columns:repeat(3,1fr)}
+  .dayActions .btn,.dayActions .btnPrimary{width:100%}
+  .missingDay{font-size:13px;padding:7px}
+}
+@media(max-width:430px){
+  .filterGrid{grid-template-columns:1fr}
+  .compareBox{grid-template-columns:1fr}
+  .editGrid{grid-template-columns:repeat(2,1fr)}
+  .btn,.btnPrimary{padding:9px 10px}
+  .weekSummary,.driverSummary{font-size:15px}
 }
 `;
