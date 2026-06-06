@@ -12,6 +12,7 @@ type Row = {
   created_at: string;
   hourly_rate?: number | null;
   machine_type?: string | null;
+  serial_number?: string | null;
 };
 
 type DriverRow = {
@@ -53,6 +54,7 @@ export default function AdminPage() {
   const [newMachine, setNewMachine] = useState("");
   const [newMachineHourlyRate, setNewMachineHourlyRate] = useState("");
   const [newMachineType, setNewMachineType] = useState("");
+  const [newMachineSerialNumber, setNewMachineSerialNumber] = useState("");
 
   const [newDriverUserId, setNewDriverUserId] = useState("");
   const [newDriverUsername, setNewDriverUsername] = useState("");
@@ -133,6 +135,7 @@ export default function AdminPage() {
     if (kind === "machines") {
       payload.hourly_rate = toNumOrNull(newMachineHourlyRate);
       payload.machine_type = newMachineType || null;
+      payload.serial_number = normName(newMachineSerialNumber) || null;
     }
 
     const { error } = await supabase.from(kind).insert(payload);
@@ -149,6 +152,7 @@ export default function AdminPage() {
       setNewMachine("");
       setNewMachineHourlyRate("");
       setNewMachineType("");
+      setNewMachineSerialNumber("");
     }
 
     setMsg("✅ Gespeichert");
@@ -232,10 +236,7 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase
-      .from("machines")
-      .update({ machine_type: machineType || null })
-      .eq("id", row.id);
+    const { error } = await supabase.from("machines").update({ machine_type: machineType || null }).eq("id", row.id);
 
     setBusy(false);
     if (error) {
@@ -244,6 +245,24 @@ export default function AdminPage() {
     }
 
     setMsg("✅ Maschinentyp gespeichert");
+    await loadAll();
+  }
+
+  async function setMachineSerialNumber(row: Row) {
+    const next = normName(prompt("Seriennummer:", row.serial_number ?? "") || "");
+
+    setMsg("Speichern...");
+    setBusy(true);
+
+    const { error } = await supabase.from("machines").update({ serial_number: next || null }).eq("id", row.id);
+
+    setBusy(false);
+    if (error) {
+      setMsg("Fehler: " + error.message);
+      return;
+    }
+
+    setMsg("✅ Seriennummer gespeichert");
     await loadAll();
   }
 
@@ -291,10 +310,7 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase
-      .from("driver_profiles")
-      .update({ is_active: !row.is_active })
-      .eq("user_id", row.user_id);
+    const { error } = await supabase.from("driver_profiles").update({ is_active: !row.is_active }).eq("user_id", row.user_id);
 
     setBusy(false);
     if (error) {
@@ -331,10 +347,7 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase
-      .from("driver_profiles")
-      .update({ username: next ? next : null })
-      .eq("user_id", row.user_id);
+    const { error } = await supabase.from("driver_profiles").update({ username: next ? next : null }).eq("user_id", row.user_id);
 
     setBusy(false);
     if (error) {
@@ -350,10 +363,7 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase
-      .from("driver_profiles")
-      .update({ default_machine: machine ? machine : null })
-      .eq("user_id", row.user_id);
+    const { error } = await supabase.from("driver_profiles").update({ default_machine: machine ? machine : null }).eq("user_id", row.user_id);
 
     setBusy(false);
     if (error) {
@@ -373,10 +383,7 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase
-      .from("driver_profiles")
-      .update({ hourly_wage: next })
-      .eq("user_id", row.user_id);
+    const { error } = await supabase.from("driver_profiles").update({ hourly_wage: next }).eq("user_id", row.user_id);
 
     setBusy(false);
     if (error) {
@@ -449,42 +456,42 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <Link href="/admin/control">
-            <button className="topBtn">Kontrolle</button>
-          </Link>
+<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+  <Link href="/admin/control">
+    <button className="topBtn">Kontrolle</button>
+  </Link>
 
-          <Link href="/admin/export">
-            <button className="topBtn">Export</button>
-          </Link>
+  <Link href="/admin/export">
+    <button className="topBtn">Export</button>
+  </Link>
 
-          <Link href="/app">
-            <button className="topBtn">Zur Übersicht</button>
-          </Link>
+  <Link href="/admin/komatsu">
+    <button className="topBtn">Komatsu</button>
+  </Link>
 
-          <button onClick={loadAll} disabled={busy} className="topBtn">
-            {busy ? "…" : "Neu laden"}
-          </button>
-        </div>
+  <Link href="/app">
+    <button className="topBtn">Zur Übersicht</button>
+  </Link>
+
+  <button onClick={loadAll} disabled={busy} className="topBtn">
+    {busy ? "…" : "Neu laden"}
+  </button>
+</div>
       </header>
 
       <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
-        {/* OBJEKTE */}
         <details className="adminSection" open>
           <summary className="sectionSummary">
             <span className="plus">＋</span>
             <span>Objekte</span>
-            <span className="count">Aktiv: {activeObjects.length} / Gesamt: {objects.length}</span>
+            <span className="count">
+              Aktiv: {activeObjects.length} / Gesamt: {objects.length}
+            </span>
           </summary>
 
           <div className="sectionInner">
             <div className="inputRow">
-              <input
-                value={newObject}
-                onChange={(e) => setNewObject(e.target.value)}
-                placeholder="Neues Objekt, z.B. Holzpolter 17"
-                className="input"
-              />
+              <input value={newObject} onChange={(e) => setNewObject(e.target.value)} placeholder="Neues Objekt, z.B. Holzpolter 17" className="input" />
               <button type="button" onClick={() => add("objects")} disabled={busy} className="primaryBtn">
                 Hinzufügen
               </button>
@@ -516,49 +523,29 @@ export default function AdminPage() {
           </div>
         </details>
 
-        {/* FAHRER */}
         <details className="adminSection">
           <summary className="sectionSummary">
             <span className="plus">＋</span>
             <span>Fahrer</span>
-            <span className="count">Aktiv: {activeDrivers.length} / Gesamt: {drivers.length}</span>
+            <span className="count">
+              Aktiv: {activeDrivers.length} / Gesamt: {drivers.length}
+            </span>
           </summary>
 
           <div className="sectionInner">
-            <div style={{ opacity: 0.75, marginBottom: 10 }}>
-              user_id bekommst du im Supabase Dashboard unter Auth → Users.
-            </div>
+            <div style={{ opacity: 0.75, marginBottom: 10 }}>user_id bekommst du im Supabase Dashboard unter Auth → Users.</div>
 
             <div style={{ display: "grid", gap: 10 }}>
-              <input
-                value={newDriverUserId}
-                onChange={(e) => setNewDriverUserId(e.target.value)}
-                placeholder="user_id (UUID) aus Auth Users"
-                className="input"
-              />
+              <input value={newDriverUserId} onChange={(e) => setNewDriverUserId(e.target.value)} placeholder="user_id (UUID) aus Auth Users" className="input" />
 
               <div className="inputRow">
-                <input
-                  value={newDriverFullName}
-                  onChange={(e) => setNewDriverFullName(e.target.value)}
-                  placeholder="Name (Pflicht), z.B. Max Mustermann"
-                  className="input"
-                />
+                <input value={newDriverFullName} onChange={(e) => setNewDriverFullName(e.target.value)} placeholder="Name (Pflicht), z.B. Max Mustermann" className="input" />
 
-                <input
-                  value={newDriverUsername}
-                  onChange={(e) => setNewDriverUsername(e.target.value)}
-                  placeholder="Benutzername (optional)"
-                  className="input"
-                />
+                <input value={newDriverUsername} onChange={(e) => setNewDriverUsername(e.target.value)} placeholder="Benutzername (optional)" className="input" />
               </div>
 
               <div className="inputRow">
-                <select
-                  value={newDriverDefaultMachine}
-                  onChange={(e) => setNewDriverDefaultMachine(e.target.value)}
-                  className="input"
-                >
+                <select value={newDriverDefaultMachine} onChange={(e) => setNewDriverDefaultMachine(e.target.value)} className="input">
                   <option value="">Standard-Maschine (optional) …</option>
                   {machines.map((m) => (
                     <option key={m.id} value={m.name}>
@@ -567,13 +554,7 @@ export default function AdminPage() {
                   ))}
                 </select>
 
-                <input
-                  value={newDriverHourlyWage}
-                  onChange={(e) => setNewDriverHourlyWage(e.target.value)}
-                  placeholder="Stundenlohn, z.B. 19,5"
-                  inputMode="decimal"
-                  className="input"
-                />
+                <input value={newDriverHourlyWage} onChange={(e) => setNewDriverHourlyWage(e.target.value)} placeholder="Stundenlohn, z.B. 19,5" inputMode="decimal" className="input" />
 
                 <button type="button" onClick={addDriver} disabled={busy} className="primaryBtn">
                   Fahrer hinzufügen
@@ -595,12 +576,7 @@ export default function AdminPage() {
                   </div>
 
                   <div className="actions">
-                    <select
-                      value={d.default_machine ?? ""}
-                      onChange={(e) => setDriverDefaultMachine(d, e.target.value)}
-                      disabled={busy}
-                      className="smallSelect"
-                    >
+                    <select value={d.default_machine ?? ""} onChange={(e) => setDriverDefaultMachine(d, e.target.value)} disabled={busy} className="smallSelect">
                       <option value="">Standard-Maschine…</option>
                       {machines
                         .filter((x) => x.is_active)
@@ -614,19 +590,15 @@ export default function AdminPage() {
                     <button type="button" onClick={() => setDriverHourlyWage(d)} disabled={busy} className="smallBtn">
                       Lohn
                     </button>
-
                     <button type="button" onClick={() => toggleDriverActive(d)} disabled={busy} className="smallBtn">
                       {d.is_active ? "Deaktivieren" : "Aktivieren"}
                     </button>
-
                     <button type="button" onClick={() => renameDriver(d)} disabled={busy} className="smallBtn">
                       Umbenennen
                     </button>
-
                     <button type="button" onClick={() => setDriverUsername(d)} disabled={busy} className="smallBtn">
                       Username
                     </button>
-
                     <button type="button" onClick={() => removeDriver(d)} disabled={busy} className="smallBtn">
                       Löschen
                     </button>
@@ -639,30 +611,20 @@ export default function AdminPage() {
           </div>
         </details>
 
-        {/* MASCHINEN */}
         <details className="adminSection">
           <summary className="sectionSummary">
             <span className="plus">＋</span>
             <span>Maschinen</span>
-            <span className="count">Aktiv: {activeMachines.length} / Gesamt: {machines.length}</span>
+            <span className="count">
+              Aktiv: {activeMachines.length} / Gesamt: {machines.length}
+            </span>
           </summary>
 
           <div className="sectionInner">
             <div className="inputRow">
-              <input
-                value={newMachine}
-                onChange={(e) => setNewMachine(e.target.value)}
-                placeholder="Neue Maschine, z.B. Harvester H1"
-                className="input"
-              />
+              <input value={newMachine} onChange={(e) => setNewMachine(e.target.value)} placeholder="Neue Maschine, z.B. Harvester H1" className="input" />
 
-              <input
-                value={newMachineHourlyRate}
-                onChange={(e) => setNewMachineHourlyRate(e.target.value)}
-                placeholder="Stundenpreis, z.B. 95"
-                inputMode="decimal"
-                className="input"
-              />
+              <input value={newMachineHourlyRate} onChange={(e) => setNewMachineHourlyRate(e.target.value)} placeholder="Stundenpreis, z.B. 95" inputMode="decimal" className="input" />
 
               <select value={newMachineType} onChange={(e) => setNewMachineType(e.target.value)} className="input">
                 <option value="">Typ…</option>
@@ -671,6 +633,8 @@ export default function AdminPage() {
                 <option value="motormanuel">Motormanuel</option>
                 <option value="sonstiges">Sonstiges</option>
               </select>
+
+              <input value={newMachineSerialNumber} onChange={(e) => setNewMachineSerialNumber(e.target.value)} placeholder="Seriennummer, z.B. 8550033898" className="input" />
 
               <button type="button" onClick={() => add("machines")} disabled={busy} className="primaryBtn">
                 Hinzufügen
@@ -685,16 +649,12 @@ export default function AdminPage() {
                     <div style={{ opacity: 0.8, marginTop: 4, fontSize: 13 }}>
                       Stundenpreis: <b>{m.hourly_rate ?? <span style={{ opacity: 0.7 }}>(leer)</span>} €/h</b>
                       {" · "}Typ: <b>{m.machine_type || <span style={{ opacity: 0.7 }}>(leer)</span>}</b>
+                      {" · "}Seriennr.: <b>{m.serial_number || <span style={{ opacity: 0.7 }}>(leer)</span>}</b>
                     </div>
                   </div>
 
                   <div className="actions">
-                    <select
-                      value={m.machine_type ?? ""}
-                      onChange={(e) => setMachineType(m, e.target.value)}
-                      disabled={busy}
-                      className="smallSelect"
-                    >
+                    <select value={m.machine_type ?? ""} onChange={(e) => setMachineType(m, e.target.value)} disabled={busy} className="smallSelect">
                       <option value="">Typ…</option>
                       <option value="harvester">Harvester</option>
                       <option value="forwarder">Forwarder</option>
@@ -704,6 +664,10 @@ export default function AdminPage() {
 
                     <button type="button" onClick={() => setMachineHourlyRate(m)} disabled={busy} className="smallBtn">
                       Preis
+                    </button>
+
+                    <button type="button" onClick={() => setMachineSerialNumber(m)} disabled={busy} className="smallBtn">
+                      Seriennr.
                     </button>
 
                     <button type="button" onClick={() => toggleActive("machines", m)} disabled={busy} className="smallBtn">
