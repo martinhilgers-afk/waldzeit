@@ -6,8 +6,19 @@ import ExcelJS from "exceljs";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
 
-type Driver = { user_id: string; full_name: string | null; username: string | null; is_active: boolean | null };
-type Option = { id: string; name: string; serial_number?: string | null; is_active?: boolean | null };
+type Driver = {
+  user_id: string;
+  full_name: string | null;
+  username: string | null;
+  is_active: boolean | null;
+};
+
+type Option = {
+  id: string;
+  name: string;
+  serial_number?: string | null;
+  is_active?: boolean | null;
+};
 
 type KomatsuRow = {
   id: string;
@@ -24,7 +35,40 @@ type KomatsuRow = {
   effective_work_h: number | null;
   motorstunden: number | null;
   is_checked: boolean;
-  note: string | null;
+  note?: string | null;
+};
+
+type WorkItemRef = {
+  id: string;
+  workday_id: string;
+  date: string;
+  user_id: string;
+  objekt: string | null;
+  maschine: string | null;
+  maschinenstunden_h: number | null;
+  motormanuel_h: number | null;
+};
+
+type WaldzeitMatch = {
+  hours: number;
+  items: WorkItemRef[];
+  matchType: "exact" | "machine" | "none";
+};
+
+type EnrichedRow = {
+  r: KomatsuRow;
+  komatsu: number | null;
+  wald: number | null;
+  diff: number | null;
+  statusText: string;
+  statusClass: "ok" | "warn" | "bad";
+  match: WaldzeitMatch;
+};
+
+type DriverGroup = {
+  driverId: string;
+  driverName: string;
+  rows: EnrichedRow[];
 };
 
 function todayISO() {
@@ -47,6 +91,12 @@ function round1(v: number | null | undefined) {
   return Math.round(v * 10) / 10;
 }
 
+function format1(v: number | null | undefined) {
+  const r = round1(v);
+  if (r === null) return "-";
+  return r.toFixed(1);
+}
+
 function toNum(v: any) {
   if (v === null || v === undefined || v === "") return null;
   if (typeof v === "number") return round1(v);
@@ -55,18 +105,29 @@ function toNum(v: any) {
   return Number.isFinite(n) ? round1(n) : null;
 }
 
+function toEditValue(v: number | null | undefined) {
+  const r = round1(v);
+  if (r === null) return "";
+  return String(r).replace(".", ",");
+}
+
 function excelDateToISO(v: any) {
   if (!v) return "";
+
   if (v instanceof Date) {
     return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, "0")}-${String(v.getDate()).padStart(2, "0")}`;
   }
+
   const s = String(v).trim();
+
   const m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
   if (m) {
     const y = m[3].length === 2 ? `20${m[3]}` : m[3];
     return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
   }
+
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+
   return "";
 }
 
@@ -78,13 +139,27 @@ function norm(s: any) {
   return String(s ?? "").trim();
 }
 
-function status(diff: number | null, hasMapping: boolean) {
-  if (!hasMapping) return "❓ Zuordnung fehlt";
-  if (diff === null) return "❓ Keine Waldzeit";
+function keyPart(s: any) {
+  return norm(s).toLowerCase();
+}
+
+function makeExactKey(date: string, driverId: string, machine: string, objectName: string) {
+  return [date, driverId, keyPart(machine), keyPart(objectName)].join("__");
+}
+
+function makeMachineKey(date: string, driverId: string, machine: string) {
+  return [date, driverId, keyPart(machine)].join("__");
+}
+
+function getStatus(diff: number | null, hasMapping: boolean, matchType: WaldzeitMatch["matchType"]) {
+  if (!hasMapping) return { text: "❓ Zuordnung fehlt", cls: "warn" as const };
+  if (matchType === "none") return { text: "❓ Keine Waldzeit", cls: "warn" as const };
+  if (diff === null) return { text: "❓ Keine Waldzeit", cls: "warn" as const };
+
   const a = Math.abs(diff);
-  if (a <= 0.2) return "✅ OK";
-  if (a <= 0.5) return "⚠️ Prüfen";
-  return "🔴 Fehler";
+  if (a <= 0.2) return { text: "✅ OK", cls: "ok" as const };
+  if (a <= 0.5) return { text: "⚠️ Prüfen", cls: "warn" as const };
+  return { text: "🔴 Fehler", cls: "bad" as const };
 }
 
 async function isAdmin() {
@@ -106,7 +181,12 @@ export default function KomatsuPage() {
   const [machines, setMachines] = useState<Option[]>([]);
   const [rows, setRows] = useState<KomatsuRow[]>([]);
 
-  const [waldzeitMap, setWaldzeitMap] = useState<Map<string, number>>(new Map());
+  const [exactWaldzeitMap, setExactWaldzeitMap] = useState<Map<string, WaldzeitMatch>>(new Map());
+  const [machineWaldzeitMap, setMachineWaldzeitMap] = useState<Map<string, WaldzeitMatch>>(new Map());
+
+  const [waldzeitEdits, setWaldzeitEdits] = useState<Record<string, string>>({});
+  const [openDrivers, setOpenDrivers] = useState<Record<string, boolean>>({});
+
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -117,10 +197,12 @@ export default function KomatsuPage() {
         location.href = "/";
         return;
       }
+
       setMeName(me.firstName || me.email || "");
 
       const ok = await isAdmin();
       setAdmin(ok);
+
       if (ok) await loadAll();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,6 +233,8 @@ export default function KomatsuPage() {
   }
 
   async function loadRows() {
+    setBusy(true);
+
     let q = supabase
       .from("komatsu_hours")
       .select("*")
@@ -164,16 +248,20 @@ export default function KomatsuPage() {
 
     if (error) {
       setMsg("Fehler Komatsu laden: " + error.message);
+      setBusy(false);
       return;
     }
 
     const r = ((data as any[]) ?? []) as KomatsuRow[];
     setRows(r);
-    await buildWaldzeitMap(r);
+
+    await buildWaldzeitMaps();
+
     setMsg("");
+    setBusy(false);
   }
 
-  async function buildWaldzeitMap(komatsuRows: KomatsuRow[]) {
+  async function buildWaldzeitMaps() {
     const { data: days, error: dayErr } = await supabase
       .from("workdays")
       .select("id,user_id,date")
@@ -184,37 +272,58 @@ export default function KomatsuPage() {
 
     const dayRows = ((days as any[]) ?? []) as { id: string; user_id: string; date: string }[];
     const dayIds = dayRows.map((d) => d.id);
+
     if (dayIds.length === 0) {
-      setWaldzeitMap(new Map());
+      setExactWaldzeitMap(new Map());
+      setMachineWaldzeitMap(new Map());
       return;
     }
 
     const { data: items, error: itemErr } = await supabase
       .from("work_items")
-      .select("workday_id,objekt,maschine,maschinenstunden_h,motormanuel_h")
+      .select("id,workday_id,objekt,maschine,maschinenstunden_h,motormanuel_h")
       .in("workday_id", dayIds);
 
     if (itemErr) return;
 
     const dayById = new Map(dayRows.map((d) => [d.id, d]));
-    const map = new Map<string, number>();
+
+    const exactMap = new Map<string, WaldzeitMatch>();
+    const machineMap = new Map<string, WaldzeitMatch>();
 
     for (const it of ((items as any[]) ?? [])) {
       const d = dayById.get(it.workday_id);
       if (!d) continue;
 
-      const key = [
-        d.date,
-        d.user_id,
-        norm(it.maschine).toLowerCase(),
-        norm(it.objekt).toLowerCase(),
-      ].join("__");
+      const h = round1(Number(it.maschinenstunden_h ?? 0) + Number(it.motormanuel_h ?? 0)) ?? 0;
 
-      const h = Number(it.maschinenstunden_h ?? 0) + Number(it.motormanuel_h ?? 0);
-      map.set(key, round1((map.get(key) ?? 0) + h) ?? 0);
+      const ref: WorkItemRef = {
+        id: it.id,
+        workday_id: it.workday_id,
+        date: d.date,
+        user_id: d.user_id,
+        objekt: it.objekt,
+        maschine: it.maschine,
+        maschinenstunden_h: it.maschinenstunden_h,
+        motormanuel_h: it.motormanuel_h,
+      };
+
+      const exactKey = makeExactKey(d.date, d.user_id, it.maschine ?? "", it.objekt ?? "");
+      const machineKey = makeMachineKey(d.date, d.user_id, it.maschine ?? "");
+
+      const exact = exactMap.get(exactKey) ?? { hours: 0, items: [], matchType: "exact" as const };
+      exact.hours = round1(exact.hours + h) ?? 0;
+      exact.items.push(ref);
+      exactMap.set(exactKey, exact);
+
+      const machine = machineMap.get(machineKey) ?? { hours: 0, items: [], matchType: "machine" as const };
+      machine.hours = round1(machine.hours + h) ?? 0;
+      machine.items.push(ref);
+      machineMap.set(machineKey, machine);
     }
 
-    setWaldzeitMap(map);
+    setExactWaldzeitMap(exactMap);
+    setMachineWaldzeitMap(machineMap);
   }
 
   function findMachineBySerial(serial: string | null) {
@@ -225,13 +334,22 @@ export default function KomatsuPage() {
   function autoDriver(driverName: string | null) {
     const n = norm(driverName).toLowerCase();
     if (!n) return "";
-    const hit = drivers.find((d) => labelDriver(d).toLowerCase() === n);
-    return hit?.user_id ?? "";
+
+    const exact = drivers.find((d) => labelDriver(d).toLowerCase() === n);
+    if (exact) return exact.user_id;
+
+    const contains = drivers.find((d) => {
+      const label = labelDriver(d).toLowerCase();
+      return label.includes(n) || n.includes(label);
+    });
+
+    return contains?.user_id ?? "";
   }
 
   function effectiveMachineName(r: KomatsuRow) {
     const corrected = norm(r.corrected_machine_name);
     if (corrected) return corrected;
+
     const bySerial = findMachineBySerial(r.serial_number);
     return bySerial?.name || norm(r.machine_name);
   }
@@ -240,18 +358,36 @@ export default function KomatsuPage() {
     return r.corrected_driver_id || autoDriver(r.driver_name);
   }
 
+  function effectiveDriverName(r: KomatsuRow) {
+    const driverId = effectiveDriverId(r);
+    const d = drivers.find((x) => x.user_id === driverId);
+    return d ? labelDriver(d) : norm(r.driver_name) || "Ohne Fahrer";
+  }
+
   function effectiveObject(r: KomatsuRow) {
     return norm(r.corrected_object_name) || norm(r.object_name);
   }
 
-  function getWaldzeitHours(r: KomatsuRow) {
+  function getWaldzeitMatch(r: KomatsuRow): WaldzeitMatch {
     const driverId = effectiveDriverId(r);
     const machine = effectiveMachineName(r);
     const obj = effectiveObject(r);
-    if (!driverId || !machine || !obj) return null;
 
-    const key = [r.date, driverId, machine.toLowerCase(), obj.toLowerCase()].join("__");
-    return waldzeitMap.get(key) ?? null;
+    if (!driverId || !machine) {
+      return { hours: 0, items: [], matchType: "none" };
+    }
+
+    if (obj) {
+      const exactKey = makeExactKey(r.date, driverId, machine, obj);
+      const exact = exactWaldzeitMap.get(exactKey);
+      if (exact) return exact;
+    }
+
+    const machineKey = makeMachineKey(r.date, driverId, machine);
+    const machineMatch = machineWaldzeitMap.get(machineKey);
+    if (machineMatch) return machineMatch;
+
+    return { hours: 0, items: [], matchType: "none" };
   }
 
   async function updateRow(id: string, patch: Partial<KomatsuRow>) {
@@ -259,6 +395,55 @@ export default function KomatsuPage() {
 
     const { error } = await supabase.from("komatsu_hours").update(patch).eq("id", id);
     if (error) setMsg("Fehler Speichern: " + error.message);
+  }
+
+  async function saveWaldzeitHours(row: KomatsuRow, match: WaldzeitMatch) {
+    const raw = waldzeitEdits[row.id];
+    const next = toNum(raw);
+
+    if (next === null) {
+      setMsg("Bitte eine gültige Waldzeit-Stundenzahl eingeben.");
+      return;
+    }
+
+    if (match.items.length === 0) {
+      setMsg("Keine passende Waldzeit-Zeile gefunden. Bitte zuerst Fahrer/Maschine/Objekt korrekt zuordnen.");
+      return;
+    }
+
+    const first = match.items[0];
+    const rest = match.items.slice(1);
+
+    const restHours = rest.reduce((sum, it) => {
+      return sum + Number(it.maschinenstunden_h ?? 0) + Number(it.motormanuel_h ?? 0);
+    }, 0);
+
+    const firstNew = round1(next - restHours);
+    if (firstNew === null || firstNew < 0) {
+      setMsg("Der neue Wert ist kleiner als die Summe der übrigen Waldzeit-Einsätze. Bitte direkt in der Kontrollseite prüfen.");
+      return;
+    }
+
+    setBusy(true);
+    setMsg("Speichere Waldzeit-Stunden...");
+
+    const useMotormanuel = Number(first.motormanuel_h ?? 0) > 0 && Number(first.maschinenstunden_h ?? 0) === 0;
+
+    const payload = useMotormanuel
+      ? { motormanuel_h: firstNew }
+      : { maschinenstunden_h: firstNew };
+
+    const { error } = await supabase.from("work_items").update(payload).eq("id", first.id);
+
+    if (error) {
+      setMsg("Fehler Waldzeit speichern: " + error.message);
+      setBusy(false);
+      return;
+    }
+
+    setMsg("✅ Waldzeit-Stunden gespeichert.");
+    await buildWaldzeitMaps();
+    setBusy(false);
   }
 
   async function importExcel(file: File) {
@@ -284,7 +469,6 @@ export default function KomatsuPage() {
         const c2 = norm(vals[2]);
         const c3 = vals[3];
         const c4 = norm(vals[4]);
-        const c5 = vals[5];
         const c6 = vals[6];
         const c7 = vals[7];
         const c8 = vals[8];
@@ -330,7 +514,6 @@ export default function KomatsuPage() {
           effective_work_h: effectiveWork,
           motorstunden,
           is_checked: false,
-          note: null,
         });
       });
 
@@ -352,16 +535,81 @@ export default function KomatsuPage() {
     }
   }
 
-  const enriched = useMemo(() => {
+  const enriched = useMemo<EnrichedRow[]>(() => {
     return rows.map((r) => {
       const komatsu = r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? null;
-      const wald = getWaldzeitHours(r);
+      const match = getWaldzeitMatch(r);
+      const wald = match.matchType === "none" ? null : match.hours;
       const diff = komatsu !== null && wald !== null ? round1(wald - komatsu) : null;
-      const hasMapping = !!effectiveDriverId(r) && !!effectiveMachineName(r) && !!effectiveObject(r);
-      return { r, komatsu, wald, diff, status: status(diff, hasMapping) };
+      const hasMapping = !!effectiveDriverId(r) && !!effectiveMachineName(r);
+      const s = getStatus(diff, hasMapping, match.matchType);
+
+      return {
+        r,
+        komatsu,
+        wald,
+        diff,
+        statusText: s.text,
+        statusClass: s.cls,
+        match,
+      };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, waldzeitMap, drivers, machines]);
+  }, [rows, exactWaldzeitMap, machineWaldzeitMap, drivers, machines]);
+
+  const grouped = useMemo<DriverGroup[]>(() => {
+    const map = new Map<string, DriverGroup>();
+
+    for (const e of enriched) {
+      const driverId = effectiveDriverId(e.r) || `komatsu_${effectiveDriverName(e.r)}`;
+      const driverName = effectiveDriverName(e.r);
+
+      const g = map.get(driverId) ?? {
+        driverId,
+        driverName,
+        rows: [],
+      };
+
+      g.rows.push(e);
+      map.set(driverId, g);
+    }
+
+    const result = Array.from(map.values());
+
+    result.sort((a, b) => a.driverName.localeCompare(b.driverName, "de", { sensitivity: "base" }));
+
+    for (const g of result) {
+      g.rows.sort((a, b) => {
+        if (a.r.date !== b.r.date) return b.r.date.localeCompare(a.r.date);
+        return effectiveMachineName(a.r).localeCompare(effectiveMachineName(b.r), "de", { sensitivity: "base" });
+      });
+    }
+
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enriched, drivers]);
+
+  async function markDriverGroupChecked(group: DriverGroup) {
+    const ids = group.rows.map((x) => x.r.id);
+    if (ids.length === 0) return;
+
+    if (!confirm(`${group.driverName}: ${ids.length} Komatsu-Zeilen als geprüft markieren?`)) return;
+
+    setBusy(true);
+    setMsg("Markiere Fahrergruppe als geprüft...");
+
+    const { error } = await supabase.from("komatsu_hours").update({ is_checked: true }).in("id", ids);
+
+    if (error) {
+      setMsg("Fehler: " + error.message);
+      setBusy(false);
+      return;
+    }
+
+    setMsg("✅ Fahrergruppe geprüft.");
+    await loadRows();
+    setBusy(false);
+  }
 
   if (admin === null) {
     return <main className="wrap">Lade…</main>;
@@ -399,7 +647,7 @@ export default function KomatsuPage() {
       <section className="card">
         <h2>Import / Filter</h2>
 
-        <div className="grid">
+        <div className="filterGrid">
           <label>
             Von
             <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
@@ -416,7 +664,7 @@ export default function KomatsuPage() {
           </label>
 
           <button onClick={loadRows} disabled={busy} className="btnPrimary">
-            Aktualisieren
+            {busy ? "Lade..." : "Aktualisieren"}
           </button>
 
           <label className="upload">
@@ -435,107 +683,406 @@ export default function KomatsuPage() {
         {msg && <pre className="msg">{msg}</pre>}
       </section>
 
-      <section className="list">
-        {enriched.map(({ r, komatsu, wald, diff, status }) => (
-          <div key={r.id} className={status.includes("🔴") ? "row bad" : status.includes("⚠️") || status.includes("❓") ? "row warn" : "row ok"}>
-            <div className="rowTop">
-              <b>{fmtDE(r.date)}</b>
-              <span>{status}</span>
-              <span>Komatsu: <b>{komatsu ?? "-"}</b> h</span>
-              <span>Waldzeit: <b>{wald ?? "-"}</b> h</span>
-              <span>Diff: <b>{diff ?? "-"}</b> h</span>
-            </div>
+      <section className="groups">
+        {grouped.map((group, idx) => {
+          const badCount = group.rows.filter((x) => x.statusClass === "bad").length;
+          const warnCount = group.rows.filter((x) => x.statusClass === "warn").length;
+          const okCount = group.rows.filter((x) => x.statusClass === "ok").length;
+          const open = openDrivers[group.driverId] ?? idx === 0;
 
-            <div className="editGrid">
-              <label>
-                Seriennummer
-                <input value={r.serial_number ?? ""} onChange={(e) => updateRow(r.id, { serial_number: e.target.value })} />
-              </label>
+          return (
+            <details
+              key={group.driverId}
+              className="driverGroup"
+              open={open}
+              onToggle={(e) => {
+  const isOpen = (e.currentTarget as HTMLDetailsElement).open;
 
-              <label>
-                Maschine
-                <select value={effectiveMachineName(r)} onChange={(e) => updateRow(r.id, { corrected_machine_name: e.target.value })}>
-                  <option value="">Bitte wählen…</option>
-                  {machines.map((m) => (
-                    <option key={m.id} value={m.name}>{m.name}</option>
-                  ))}
-                </select>
-              </label>
+  setOpenDrivers((prev) => ({
+    ...prev,
+    [group.driverId]: isOpen,
+  }));
+}}
+            >
+              <summary className="driverSummary">
+                <span className="plus">＋</span>
+                <b>{group.driverName}</b>
+                <span className="summaryMeta">
+                  {group.rows.length} Zeilen · ✅ {okCount} · ⚠️ {warnCount} · 🔴 {badCount}
+                </span>
+              </summary>
 
-              <label>
-                Fahrer Komatsu
-                <input value={r.driver_name ?? ""} onChange={(e) => updateRow(r.id, { driver_name: e.target.value })} />
-              </label>
+              <div className="groupActions">
+                <button type="button" onClick={() => markDriverGroupChecked(group)} disabled={busy} className="btnPrimary">
+                  Fahrer geprüft
+                </button>
+              </div>
 
-              <label>
-                Fahrer korrigiert
-                <select value={effectiveDriverId(r)} onChange={(e) => updateRow(r.id, { corrected_driver_id: e.target.value || null })}>
-                  <option value="">Bitte wählen…</option>
-                  {drivers.map((d) => (
-                    <option key={d.user_id} value={d.user_id}>{labelDriver(d)}</option>
-                  ))}
-                </select>
-              </label>
+              <div className="rows">
+                {group.rows.map(({ r, komatsu, wald, diff, statusText, statusClass, match }) => {
+                  const editValue = waldzeitEdits[r.id] ?? toEditValue(wald);
+                  const isMachineFallback = match.matchType === "machine";
 
-              <label>
-                Objekt
-                <select value={effectiveObject(r)} onChange={(e) => updateRow(r.id, { corrected_object_name: e.target.value })}>
-                  <option value="">Bitte wählen…</option>
-                  {objects.map((o) => (
-                    <option key={o.id} value={o.name}>{o.name}</option>
-                  ))}
-                </select>
-              </label>
+                  return (
+                    <div key={r.id} className={`row ${statusClass}`}>
+                      <div className="rowTop">
+                        <b>{fmtDE(r.date)}</b>
+                        <span>{statusText}</span>
+                        <span>
+                          Komatsu: <b>{format1(komatsu)}</b> h
+                        </span>
+                        <span>
+                          Waldzeit: <b>{format1(wald)}</b> h
+                        </span>
+                        <span>
+                          Diff: <b>{format1(diff)}</b> h
+                        </span>
+                        {isMachineFallback && <span className="fallback">Objekt-Fallback</span>}
+                      </div>
 
-              <label>
-                Notiz
-                <input value={r.note ?? ""} onChange={(e) => updateRow(r.id, { note: e.target.value })} />
-              </label>
-            </div>
+                      <div className="editGrid">
+                        <label>
+                          Seriennummer
+                          <input value={r.serial_number ?? ""} onChange={(e) => updateRow(r.id, { serial_number: e.target.value })} />
+                        </label>
 
-            <div className="actions">
-              <button onClick={() => updateRow(r.id, { is_checked: !r.is_checked })} className="btnPrimary">
-                {r.is_checked ? "Wieder öffnen" : "Geprüft"}
-              </button>
-            </div>
-          </div>
-        ))}
+                        <label>
+                          Maschine
+                          <select value={effectiveMachineName(r)} onChange={(e) => updateRow(r.id, { corrected_machine_name: e.target.value })}>
+                            <option value="">Bitte wählen…</option>
+                            {machines.map((m) => (
+                              <option key={m.id} value={m.name}>
+                                {m.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
 
-        {enriched.length === 0 && <div className="card">Keine Komatsu-Daten im Zeitraum.</div>}
+                        <label>
+                          Fahrer Komatsu
+                          <input value={r.driver_name ?? ""} onChange={(e) => updateRow(r.id, { driver_name: e.target.value })} />
+                        </label>
+
+                        <label>
+                          Fahrer korrigiert
+                          <select value={effectiveDriverId(r)} onChange={(e) => updateRow(r.id, { corrected_driver_id: e.target.value || null })}>
+                            <option value="">Bitte wählen…</option>
+                            {drivers.map((d) => (
+                              <option key={d.user_id} value={d.user_id}>
+                                {labelDriver(d)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label>
+                          Objekt
+                          <select value={effectiveObject(r)} onChange={(e) => updateRow(r.id, { corrected_object_name: e.target.value })}>
+                            <option value="">Bitte wählen…</option>
+                            {objects.map((o) => (
+                              <option key={o.id} value={o.name}>
+                                {o.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label>
+                          Waldzeit h
+                          <input
+                            value={editValue}
+                            inputMode="decimal"
+                            onChange={(e) =>
+                              setWaldzeitEdits((prev) => ({
+                                ...prev,
+                                [r.id]: e.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+
+                      <div className="matchInfo">
+                        {match.items.length > 0 ? (
+                          <span>
+                            Waldzeit-Treffer: {match.items.length} Einsatz/Einsätze · Match: {match.matchType === "exact" ? "Objekt + Maschine" : "nur Maschine"}
+                          </span>
+                        ) : (
+                          <span>Kein passender Waldzeit-Einsatz gefunden.</span>
+                        )}
+                      </div>
+
+                      <div className="actions">
+                        <button onClick={() => saveWaldzeitHours(r, match)} disabled={busy || match.items.length === 0} className="btn">
+                          Waldzeit speichern
+                        </button>
+
+                        <button onClick={() => updateRow(r.id, { is_checked: !r.is_checked })} className="btnPrimary">
+                          {r.is_checked ? "Wieder öffnen" : "Geprüft"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          );
+        })}
+
+        {grouped.length === 0 && <div className="card">Keine Komatsu-Daten im Zeitraum.</div>}
       </section>
 
       <style jsx>{`
-        .wrap{max-width:1180px;margin:18px auto;padding:10px}
-        .head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
-        .h1{margin:0;font-size:32px}
-        .sub{opacity:.8;margin-top:4px}
-        .topActions{display:flex;gap:8px;flex-wrap:wrap}
-        .card,.row{border:1px solid #eee;border-radius:14px;padding:12px;background:#fff}
-        .grid{display:grid;grid-template-columns:1fr 1fr auto auto 1.5fr;gap:10px;align-items:end}
-        label{font-weight:800;font-size:13px}
-        input,select{width:100%;margin-top:4px;padding:9px;border:1px solid #ddd;border-radius:10px;box-sizing:border-box;background:#fff}
-        .check{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px}
-        .check input{width:auto;margin:0}
-        .upload input{padding:8px}
-        .btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:900;border-radius:10px;padding:9px 11px;cursor:pointer}
-        .btnPrimary{background:#fafafa}
-        .msg{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px}
-        .list{display:grid;gap:10px;margin-top:12px}
-        .row.ok{border-color:#c7f2d5}
-        .row.warn{border-color:#f1d37a;background:#fffdf5}
-        .row.bad{border-color:#f2c7c7;background:#fffafa}
-        .rowTop{display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:14px}
-        .editGrid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;gap:8px;margin-top:10px}
-        .actions{display:flex;justify-content:flex-end;margin-top:10px}
-        @media(max-width:900px){
-          .head{flex-direction:column}
-          .grid{grid-template-columns:1fr 1fr}
-          .upload,.btnPrimary{grid-column:1 / -1}
-          .editGrid{grid-template-columns:1fr 1fr}
+        .wrap {
+          max-width: 1180px;
+          margin: 18px auto;
+          padding: 10px;
         }
-        @media(max-width:520px){
-          .grid,.editGrid{grid-template-columns:1fr}
-          .rowTop{display:grid;gap:5px}
+
+        .head {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }
+
+        .h1 {
+          margin: 0;
+          font-size: 32px;
+        }
+
+        .sub {
+          opacity: 0.8;
+          margin-top: 4px;
+        }
+
+        .topActions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .card,
+        .driverGroup,
+        .row {
+          border: 1px solid #eee;
+          border-radius: 14px;
+          padding: 12px;
+          background: #fff;
+        }
+
+        .filterGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr auto auto 1.5fr;
+          gap: 10px;
+          align-items: end;
+        }
+
+        label {
+          font-weight: 800;
+          font-size: 13px;
+        }
+
+        input,
+        select {
+          width: 100%;
+          margin-top: 4px;
+          padding: 9px;
+          border: 1px solid #ddd;
+          border-radius: 10px;
+          box-sizing: border-box;
+          background: #fff;
+        }
+
+        .check {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          border: 1px solid #eee;
+          border-radius: 10px;
+          padding: 9px;
+        }
+
+        .check input {
+          width: auto;
+          margin: 0;
+        }
+
+        .upload input {
+          padding: 8px;
+        }
+
+        .btn,
+        .btnPrimary {
+          border: 1px solid #ddd;
+          background: #fff;
+          font-weight: 900;
+          border-radius: 10px;
+          padding: 9px 11px;
+          cursor: pointer;
+        }
+
+        .btnPrimary {
+          background: #fafafa;
+        }
+
+        .msg {
+          white-space: pre-wrap;
+          background: #fafafa;
+          border: 1px solid #eee;
+          border-radius: 10px;
+          padding: 8px;
+        }
+
+        .groups {
+          display: grid;
+          gap: 10px;
+          margin-top: 12px;
+        }
+
+        .driverSummary {
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          list-style: none;
+          user-select: none;
+          font-size: 18px;
+        }
+
+        .driverSummary::-webkit-details-marker {
+          display: none;
+        }
+
+        .plus {
+          display: inline-block;
+          transition: transform 0.12s ease;
+          font-size: 20px;
+        }
+
+        details[open] > .driverSummary .plus {
+          transform: rotate(45deg);
+        }
+
+        .summaryMeta {
+          margin-left: auto;
+          opacity: 0.75;
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .groupActions {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 10px;
+        }
+
+        .rows {
+          display: grid;
+          gap: 10px;
+          margin-top: 10px;
+        }
+
+        .row.ok {
+          border-color: #c7f2d5;
+        }
+
+        .row.warn {
+          border-color: #f1d37a;
+          background: #fffdf5;
+        }
+
+        .row.bad {
+          border-color: #f2c7c7;
+          background: #fffafa;
+        }
+
+        .rowTop {
+          display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          align-items: center;
+          font-size: 14px;
+        }
+
+        .fallback {
+          background: #fff4cc;
+          border: 1px solid #f1d37a;
+          border-radius: 999px;
+          padding: 2px 8px;
+          font-weight: 900;
+          font-size: 12px;
+        }
+
+        .editGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.7fr;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .matchInfo {
+          margin-top: 8px;
+          font-size: 12px;
+          opacity: 0.75;
+          font-weight: 800;
+        }
+
+        .actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+          margin-top: 10px;
+          flex-wrap: wrap;
+        }
+
+        @media (max-width: 900px) {
+          .head {
+            flex-direction: column;
+          }
+
+          .filterGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .upload,
+          .btnPrimary {
+            grid-column: 1 / -1;
+          }
+
+          .editGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .summaryMeta {
+            width: 100%;
+            margin-left: 30px;
+          }
+
+          .driverSummary {
+            flex-wrap: wrap;
+          }
+        }
+
+        @media (max-width: 520px) {
+          .filterGrid,
+          .editGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .rowTop {
+            display: grid;
+            gap: 5px;
+          }
+
+          .actions .btn,
+          .actions .btnPrimary {
+            width: 100%;
+          }
+
+          .groupActions .btnPrimary {
+            width: 100%;
+          }
         }
       `}</style>
     </main>
