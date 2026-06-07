@@ -429,9 +429,7 @@ export default function KomatsuPage() {
 
     const useMotormanuel = Number(first.motormanuel_h ?? 0) > 0 && Number(first.maschinenstunden_h ?? 0) === 0;
 
-    const payload = useMotormanuel
-      ? { motormanuel_h: firstNew }
-      : { maschinenstunden_h: firstNew };
+    const payload = useMotormanuel ? { motormanuel_h: firstNew } : { maschinenstunden_h: firstNew };
 
     const { error } = await supabase.from("work_items").update(payload).eq("id", first.id);
 
@@ -536,24 +534,29 @@ export default function KomatsuPage() {
   }
 
   const enriched = useMemo<EnrichedRow[]>(() => {
-    return rows.map((r) => {
-      const komatsu = r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? null;
-      const match = getWaldzeitMatch(r);
-      const wald = match.matchType === "none" ? null : match.hours;
-      const diff = komatsu !== null && wald !== null ? round1(wald - komatsu) : null;
-      const hasMapping = !!effectiveDriverId(r) && !!effectiveMachineName(r);
-      const s = getStatus(diff, hasMapping, match.matchType);
+    return rows
+      .filter((r) => {
+        const komatsu = r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? null;
+        return komatsu !== null && komatsu >= 1;
+      })
+      .map((r) => {
+        const komatsu = r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? null;
+        const match = getWaldzeitMatch(r);
+        const wald = match.matchType === "none" ? null : match.hours;
+        const diff = komatsu !== null && wald !== null ? round1(wald - komatsu) : null;
+        const hasMapping = !!effectiveDriverId(r) && !!effectiveMachineName(r);
+        const s = getStatus(diff, hasMapping, match.matchType);
 
-      return {
-        r,
-        komatsu,
-        wald,
-        diff,
-        statusText: s.text,
-        statusClass: s.cls,
-        match,
-      };
-    });
+        return {
+          r,
+          komatsu,
+          wald,
+          diff,
+          statusText: s.text,
+          statusClass: s.cls,
+          match,
+        };
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, exactWaldzeitMap, machineWaldzeitMap, drivers, machines]);
 
@@ -644,7 +647,7 @@ export default function KomatsuPage() {
         </div>
       </header>
 
-      <section className="card">
+      <section className="card compactCard">
         <h2>Import / Filter</h2>
 
         <div className="filterGrid">
@@ -696,13 +699,12 @@ export default function KomatsuPage() {
               className="driverGroup"
               open={open}
               onToggle={(e) => {
-  const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-
-  setOpenDrivers((prev) => ({
-    ...prev,
-    [group.driverId]: isOpen,
-  }));
-}}
+                const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+                setOpenDrivers((prev) => ({
+                  ...prev,
+                  [group.driverId]: isOpen,
+                }));
+              }}
             >
               <summary className="driverSummary">
                 <span className="plus">＋</span>
@@ -737,6 +739,11 @@ export default function KomatsuPage() {
                         <span>
                           Diff: <b>{format1(diff)}</b> h
                         </span>
+
+                        <span className="komatsuObj">
+                          Komatsu Objekt: <b>{r.object_name || "-"}</b>
+                        </span>
+
                         {isMachineFallback && <span className="fallback">Objekt-Fallback</span>}
                       </div>
 
@@ -776,7 +783,7 @@ export default function KomatsuPage() {
                         </label>
 
                         <label>
-                          Objekt
+                          Waldzeit Objekt
                           <select value={effectiveObject(r)} onChange={(e) => updateRow(r.id, { corrected_object_name: e.target.value })}>
                             <option value="">Bitte wählen…</option>
                             {objects.map((o) => (
@@ -834,26 +841,26 @@ export default function KomatsuPage() {
 
       <style jsx>{`
         .wrap {
-          max-width: 1180px;
-          margin: 18px auto;
-          padding: 10px;
+          max-width: 1280px;
+          margin: 14px auto;
+          padding: 8px;
         }
 
         .head {
           display: flex;
           justify-content: space-between;
-          gap: 12px;
+          gap: 10px;
           align-items: flex-start;
         }
 
         .h1 {
           margin: 0;
-          font-size: 32px;
+          font-size: 30px;
         }
 
         .sub {
           opacity: 0.8;
-          margin-top: 4px;
+          margin-top: 3px;
         }
 
         .topActions {
@@ -867,40 +874,46 @@ export default function KomatsuPage() {
         .row {
           border: 1px solid #eee;
           border-radius: 14px;
-          padding: 12px;
+          padding: 10px;
           background: #fff;
+        }
+
+        .compactCard h2 {
+          margin: 0 0 8px 0;
         }
 
         .filterGrid {
           display: grid;
           grid-template-columns: 1fr 1fr auto auto 1.5fr;
-          gap: 10px;
+          gap: 8px;
           align-items: end;
         }
 
         label {
           font-weight: 800;
-          font-size: 13px;
+          font-size: 12px;
         }
 
         input,
         select {
           width: 100%;
-          margin-top: 4px;
-          padding: 9px;
+          margin-top: 3px;
+          padding: 7px;
           border: 1px solid #ddd;
-          border-radius: 10px;
+          border-radius: 9px;
           box-sizing: border-box;
           background: #fff;
+          font-size: 13px;
         }
 
         .check {
           display: flex;
-          gap: 8px;
+          gap: 7px;
           align-items: center;
           border: 1px solid #eee;
           border-radius: 10px;
-          padding: 9px;
+          padding: 8px;
+          font-size: 13px;
         }
 
         .check input {
@@ -909,7 +922,7 @@ export default function KomatsuPage() {
         }
 
         .upload input {
-          padding: 8px;
+          padding: 7px;
         }
 
         .btn,
@@ -918,8 +931,9 @@ export default function KomatsuPage() {
           background: #fff;
           font-weight: 900;
           border-radius: 10px;
-          padding: 9px 11px;
+          padding: 8px 10px;
           cursor: pointer;
+          font-size: 13px;
         }
 
         .btnPrimary {
@@ -932,22 +946,27 @@ export default function KomatsuPage() {
           border: 1px solid #eee;
           border-radius: 10px;
           padding: 8px;
+          margin: 8px 0 0 0;
         }
 
         .groups {
           display: grid;
-          gap: 10px;
-          margin-top: 12px;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .driverGroup {
+          padding: 8px;
         }
 
         .driverSummary {
           cursor: pointer;
           display: flex;
           align-items: center;
-          gap: 10px;
+          gap: 8px;
           list-style: none;
           user-select: none;
-          font-size: 18px;
+          font-size: 17px;
         }
 
         .driverSummary::-webkit-details-marker {
@@ -957,7 +976,7 @@ export default function KomatsuPage() {
         .plus {
           display: inline-block;
           transition: transform 0.12s ease;
-          font-size: 20px;
+          font-size: 19px;
         }
 
         details[open] > .driverSummary .plus {
@@ -967,20 +986,24 @@ export default function KomatsuPage() {
         .summaryMeta {
           margin-left: auto;
           opacity: 0.75;
-          font-size: 13px;
+          font-size: 12px;
           font-weight: 800;
         }
 
         .groupActions {
           display: flex;
           justify-content: flex-end;
-          margin-top: 10px;
+          margin-top: 8px;
         }
 
         .rows {
           display: grid;
-          gap: 10px;
-          margin-top: 10px;
+          gap: 7px;
+          margin-top: 8px;
+        }
+
+        .row {
+          padding: 8px;
         }
 
         .row.ok {
@@ -999,10 +1022,19 @@ export default function KomatsuPage() {
 
         .rowTop {
           display: flex;
-          gap: 12px;
+          gap: 8px;
           flex-wrap: wrap;
           align-items: center;
-          font-size: 14px;
+          font-size: 13px;
+        }
+
+        .komatsuObj {
+          background: #f7f7f7;
+          border: 1px solid #eee;
+          border-radius: 999px;
+          padding: 2px 8px;
+          font-size: 12px;
+          font-weight: 800;
         }
 
         .fallback {
@@ -1016,13 +1048,23 @@ export default function KomatsuPage() {
 
         .editGrid {
           display: grid;
-          grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.7fr;
-          gap: 8px;
-          margin-top: 10px;
+          grid-template-columns: 0.75fr 0.85fr 1fr 1fr 1.3fr 0.55fr;
+          gap: 6px;
+          margin-top: 7px;
+        }
+
+        .editGrid label {
+          font-size: 12px;
+        }
+
+        .editGrid input,
+        .editGrid select {
+          padding: 7px;
+          font-size: 13px;
         }
 
         .matchInfo {
-          margin-top: 8px;
+          margin-top: 5px;
           font-size: 12px;
           opacity: 0.75;
           font-weight: 800;
@@ -1031,12 +1073,12 @@ export default function KomatsuPage() {
         .actions {
           display: flex;
           justify-content: flex-end;
-          gap: 8px;
-          margin-top: 10px;
+          gap: 7px;
+          margin-top: 7px;
           flex-wrap: wrap;
         }
 
-        @media (max-width: 900px) {
+        @media (max-width: 1000px) {
           .head {
             flex-direction: column;
           }
@@ -1056,7 +1098,7 @@ export default function KomatsuPage() {
 
           .summaryMeta {
             width: 100%;
-            margin-left: 30px;
+            margin-left: 28px;
           }
 
           .driverSummary {
@@ -1064,7 +1106,16 @@ export default function KomatsuPage() {
           }
         }
 
-        @media (max-width: 520px) {
+        @media (max-width: 560px) {
+          .wrap {
+            margin: 8px auto;
+            padding: 6px;
+          }
+
+          .h1 {
+            font-size: 26px;
+          }
+
           .filterGrid,
           .editGrid {
             grid-template-columns: 1fr;
@@ -1072,7 +1123,7 @@ export default function KomatsuPage() {
 
           .rowTop {
             display: grid;
-            gap: 5px;
+            gap: 4px;
           }
 
           .actions .btn,
