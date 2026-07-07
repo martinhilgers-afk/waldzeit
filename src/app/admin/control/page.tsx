@@ -47,6 +47,7 @@ type ItemRow = {
   motormanuel_h: number | null;
   umsetzen_h: number | null;
   sonstiges_h: number | null;
+  sonstiges_beschreibung: string | null;
   diesel_l: number | null;
   adblue_l: number | null;
   kommentar: string | null;
@@ -76,7 +77,11 @@ type ControlDay = DayRow & {
   items: ItemRow[];
 };
 
-type DisplayDay = { date: string; day: ControlDay | null; komatsu: KomatsuRow[] };
+type DisplayDay = {
+  date: string;
+  day: ControlDay | null;
+  komatsu: KomatsuRow[];
+};
 
 type DriverWeekGroup = {
   driver: DriverRow;
@@ -159,7 +164,10 @@ function fmtDE(dateISO: string) {
 function weekdayDE(dateISO: string) {
   const [y, m, d] = dateISO.split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-  return date.toLocaleDateString("de-DE", { weekday: "short", timeZone: "UTC" });
+  return date.toLocaleDateString("de-DE", {
+    weekday: "short",
+    timeZone: "UTC",
+  });
 }
 
 function isoWeekKey(dateISO: string) {
@@ -174,7 +182,11 @@ function isoWeekKey(dateISO: string) {
   const firstThursday = new Date(yearStart);
   firstThursday.setUTCDate(firstThursday.getUTCDate() + (4 - yearStartDay));
 
-  const week = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  const week =
+    1 +
+    Math.round(
+      (date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000),
+    );
   return `${isoYear}-KW${String(week).padStart(2, "0")}`;
 }
 
@@ -184,11 +196,18 @@ function listDatesInRange(from: string, to: string) {
 
   const start = new Date(`${from}T00:00:00`);
   const end = new Date(`${to}T00:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return result;
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    start > end
+  )
+    return result;
 
   const cur = new Date(start);
   while (cur <= end) {
-    result.push(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`);
+    result.push(
+      `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`,
+    );
     cur.setDate(cur.getDate() + 1);
   }
 
@@ -223,13 +242,22 @@ function driverLabel(d: DriverRow) {
 
 function sortByLastname(a: DriverRow, b: DriverRow) {
   const getLast = (name: string | null) => {
-    const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+    const parts = String(name || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
     return parts.length ? parts[parts.length - 1].toLowerCase() : "";
   };
 
-  const cmp = getLast(a.full_name).localeCompare(getLast(b.full_name), "de", { sensitivity: "base" });
+  const cmp = getLast(a.full_name).localeCompare(getLast(b.full_name), "de", {
+    sensitivity: "base",
+  });
   if (cmp !== 0) return cmp;
-  return String(a.full_name || "").localeCompare(String(b.full_name || ""), "de", { sensitivity: "base" });
+  return String(a.full_name || "").localeCompare(
+    String(b.full_name || ""),
+    "de",
+    { sensitivity: "base" },
+  );
 }
 
 function timeDiffHours(start: string | null, end: string | null) {
@@ -255,7 +283,9 @@ function defaultFlags(day?: Partial<DayRow> | null): DayFlags {
 }
 
 function komatsuHours(k: KomatsuRow) {
-  return round1(k.motor_runtime_h ?? k.effective_work_h ?? k.motorstunden ?? null);
+  return round1(
+    k.motor_runtime_h ?? k.effective_work_h ?? k.motorstunden ?? null,
+  );
 }
 
 function komatsuEffectiveDriverId(k: KomatsuRow, drivers: DriverRow[]) {
@@ -264,7 +294,11 @@ function komatsuEffectiveDriverId(k: KomatsuRow, drivers: DriverRow[]) {
   if (!raw) return "";
   const exact = drivers.find((d) => keyPart(driverLabel(d)) === raw);
   if (exact) return exact.user_id;
-  const contains = drivers.find((d) => keyPart(driverLabel(d)).includes(raw) || raw.includes(keyPart(driverLabel(d))));
+  const contains = drivers.find(
+    (d) =>
+      keyPart(driverLabel(d)).includes(raw) ||
+      raw.includes(keyPart(driverLabel(d))),
+  );
   return contains?.user_id ?? "";
 }
 
@@ -284,20 +318,50 @@ function komatsuEffectiveObject(k: KomatsuRow) {
 }
 
 function workItemHours(it: ItemRow) {
-  return round1(
-    Number(it.maschinenstunden_h ?? 0) +
-      Number(it.unterhalt_h ?? 0) +
-      Number(it.reparatur_h ?? 0) +
-      Number(it.motormanuel_h ?? 0) +
-      Number(it.umsetzen_h ?? 0) +
-      Number(it.sonstiges_h ?? 0)
-  ) ?? 0;
+  return (
+    round1(
+      Number(it.maschinenstunden_h ?? 0) +
+        Number(it.unterhalt_h ?? 0) +
+        Number(it.reparatur_h ?? 0) +
+        Number(it.motormanuel_h ?? 0) +
+        Number(it.umsetzen_h ?? 0) +
+        Number(it.sonstiges_h ?? 0),
+    ) ?? 0
+  );
 }
 
-function sumWorkedHoursLive(items: ItemRow[], edits: Record<string, Partial<Record<NumField, string>>>) {
+function sumWorkedHoursLive(
+  items: ItemRow[],
+  edits: Record<string, Partial<Record<NumField, string>>>,
+) {
   const total = items.reduce((sum, it) => {
-    const get = (field: NumField) => toNumOrNull(edits[it.id]?.[field] ?? toEditValue(it[field])) ?? 0;
-    return sum + get("maschinenstunden_h") + get("unterhalt_h") + get("reparatur_h") + get("motormanuel_h") + get("umsetzen_h") + get("sonstiges_h");
+    const get = (field: NumField) =>
+      toNumOrNull(edits[it.id]?.[field] ?? toEditValue(it[field])) ?? 0;
+    return (
+      sum +
+      get("maschinenstunden_h") +
+      get("unterhalt_h") +
+      get("reparatur_h") +
+      get("motormanuel_h") +
+      get("umsetzen_h") +
+      get("sonstiges_h")
+    );
+  }, 0);
+
+  return round1(total) ?? 0;
+}
+
+function sumMasHoursLive(
+  items: ItemRow[],
+  edits: Record<string, Partial<Record<NumField, string>>>,
+) {
+  const total = items.reduce((sum, it) => {
+    return (
+      sum +
+      (toNumOrNull(
+        edits[it.id]?.maschinenstunden_h ?? toEditValue(it.maschinenstunden_h),
+      ) ?? 0)
+    );
   }, 0);
 
   return round1(total) ?? 0;
@@ -320,13 +384,25 @@ export default function AdminControlPage() {
 
   const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
 
-  const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
-  const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string }>>({});
+  const [edits, setEdits] = useState<
+    Record<string, Partial<Record<NumField, string>>>
+  >({});
+  const [itemTextEdits, setItemTextEdits] = useState<
+    Record<
+      string,
+      { objekt: string; maschine: string; sonstiges_beschreibung: string }
+    >
+  >({});
   const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
   const [dateEdits, setDateEdits] = useState<Record<string, string>>({});
   const [dayFlags, setDayFlags] = useState<Record<string, DayFlags>>({});
 
-  const [komatsuEdits, setKomatsuEdits] = useState<Record<string, { driverId: string; machine: string; objekt: string; hours: string }>>({});
+  const [komatsuEdits, setKomatsuEdits] = useState<
+    Record<
+      string,
+      { driverId: string; machine: string; objekt: string; hours: string }
+    >
+  >({});
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -352,20 +428,35 @@ export default function AdminControlPage() {
     setMsg("Lade...");
 
     const [dRes, objRes, machRes] = await Promise.all([
-      supabase.from("driver_profiles").select("user_id,username,full_name,is_active").order("full_name", { ascending: true }),
-      supabase.from("objects").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
-      supabase.from("machines").select("id,name,is_active,serial_number").eq("is_active", true).order("name", { ascending: true }),
+      supabase
+        .from("driver_profiles")
+        .select("user_id,username,full_name,is_active")
+        .order("full_name", { ascending: true }),
+      supabase
+        .from("objects")
+        .select("id,name,is_active")
+        .eq("is_active", true)
+        .order("name", { ascending: true }),
+      supabase
+        .from("machines")
+        .select("id,name,is_active,serial_number")
+        .eq("is_active", true)
+        .order("name", { ascending: true }),
     ]);
 
     if (dRes.error || objRes.error || machRes.error) {
       setBusy(false);
-      setMsg(`Fehler Stammdaten laden. ${dRes.error?.message || objRes.error?.message || machRes.error?.message || ""}`);
+      setMsg(
+        `Fehler Stammdaten laden. ${dRes.error?.message || objRes.error?.message || machRes.error?.message || ""}`,
+      );
       return;
     }
 
-    const driverRows = (((dRes.data as any[]) ?? []) as DriverRow[]).sort(sortByLastname);
-    const objectRows = (((objRes.data as any[]) ?? []) as OptionRow[]);
-    const machineRows = (((machRes.data as any[]) ?? []) as OptionRow[]);
+    const driverRows = (((dRes.data as any[]) ?? []) as DriverRow[]).sort(
+      sortByLastname,
+    );
+    const objectRows = ((objRes.data as any[]) ?? []) as OptionRow[];
+    const machineRows = ((machRes.data as any[]) ?? []) as OptionRow[];
 
     setDrivers(driverRows);
     setObjects(objectRows);
@@ -376,7 +467,9 @@ export default function AdminControlPage() {
 
     let q = supabase
       .from("workdays")
-      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,is_feiertag,is_controlled,controlled_at")
+      .select(
+        "id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter,is_feiertag,is_controlled,controlled_at",
+      )
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: false });
@@ -399,7 +492,7 @@ export default function AdminControlPage() {
       const itemRes = await supabase
         .from("work_items")
         .select(
-          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
+          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h",
         )
         .in("workday_id", dayIds);
 
@@ -414,7 +507,9 @@ export default function AdminControlPage() {
 
     const kRes = await supabase
       .from("komatsu_hours")
-      .select("id,import_name,serial_number,machine_name,corrected_machine_name,driver_name,corrected_driver_id,date,object_name,corrected_object_name,motor_runtime_h,effective_work_h,motorstunden,is_checked")
+      .select(
+        "id,import_name,serial_number,machine_name,corrected_machine_name,driver_name,corrected_driver_id,date,object_name,corrected_object_name,motor_runtime_h,effective_work_h,motorstunden,is_checked",
+      )
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: false });
@@ -439,7 +534,10 @@ export default function AdminControlPage() {
     }));
 
     const nextEdits: Record<string, Partial<Record<NumField, string>>> = {};
-    const nextTextEdits: Record<string, { objekt: string; maschine: string }> = {};
+    const nextTextEdits: Record<
+      string,
+      { objekt: string; maschine: string; sonstiges_beschreibung: string }
+    > = {};
 
     for (const item of itemRows) {
       nextEdits[item.id] = {};
@@ -448,6 +546,7 @@ export default function AdminControlPage() {
       nextTextEdits[item.id] = {
         objekt: item.objekt ?? "",
         maschine: item.maschine ?? "",
+        sonstiges_beschreibung: item.sonstiges_beschreibung ?? "",
       };
     }
 
@@ -461,15 +560,21 @@ export default function AdminControlPage() {
       nextFlags[day.id] = defaultFlags(day);
     }
 
-    const rawKomatsu = (((kRes.data as any[]) ?? []) as KomatsuRow[]).filter((k) => {
-      const h = komatsuHours(k);
-      if (h === null || h < 1) return false;
-      if (onlyUnchecked && k.is_checked) return false;
-      if (selectedDriver) return komatsuEffectiveDriverId(k, driverRows) === selectedDriver;
-      return true;
-    });
+    const rawKomatsu = (((kRes.data as any[]) ?? []) as KomatsuRow[]).filter(
+      (k) => {
+        const h = komatsuHours(k);
+        if (h === null || h < 1) return false;
+        if (onlyUnchecked && k.is_checked) return false;
+        if (selectedDriver)
+          return komatsuEffectiveDriverId(k, driverRows) === selectedDriver;
+        return true;
+      },
+    );
 
-    const nextKomatsuEdits: Record<string, { driverId: string; machine: string; objekt: string; hours: string }> = {};
+    const nextKomatsuEdits: Record<
+      string,
+      { driverId: string; machine: string; objekt: string; hours: string }
+    > = {};
     for (const k of rawKomatsu) {
       nextKomatsuEdits[k.id] = {
         driverId: komatsuEffectiveDriverId(k, driverRows),
@@ -501,17 +606,29 @@ export default function AdminControlPage() {
     }));
   }
 
-  function updateItemText(itemId: string, field: "objekt" | "maschine", value: string) {
+  function updateItemText(
+    itemId: string,
+    field: "objekt" | "maschine" | "sonstiges_beschreibung",
+    value: string,
+  ) {
     setItemTextEdits((prev) => ({
       ...prev,
       [itemId]: {
-        ...(prev[itemId] ?? { objekt: "", maschine: "" }),
+        ...(prev[itemId] ?? {
+          objekt: "",
+          maschine: "",
+          sonstiges_beschreibung: "",
+        }),
         [field]: value,
       },
     }));
   }
 
-  function updateKomatsuEdit(id: string, field: "driverId" | "machine" | "objekt" | "hours", value: string) {
+  function updateKomatsuEdit(
+    id: string,
+    field: "driverId" | "machine" | "objekt" | "hours",
+    value: string,
+  ) {
     setKomatsuEdits((prev) => ({
       ...prev,
       [id]: {
@@ -521,13 +638,44 @@ export default function AdminControlPage() {
     }));
   }
 
-  function updateDayFlag(dayId: string, field: "is_urlaub" | "is_wetter" | "is_feiertag", checked: boolean) {
+  function updateDayFlag(
+    dayId: string,
+    field: "is_urlaub" | "is_wetter" | "is_feiertag",
+    checked: boolean,
+  ) {
     setDayFlags((prev) => {
-      const current = prev[dayId] ?? { is_urlaub: false, is_wetter: false, is_feiertag: false };
+      const current = prev[dayId] ?? {
+        is_urlaub: false,
+        is_wetter: false,
+        is_feiertag: false,
+      };
 
-      if (field === "is_urlaub") return { ...prev, [dayId]: { is_urlaub: checked, is_wetter: checked ? false : current.is_wetter, is_feiertag: checked ? false : current.is_feiertag } };
-      if (field === "is_wetter") return { ...prev, [dayId]: { is_urlaub: checked ? false : current.is_urlaub, is_wetter: checked, is_feiertag: checked ? false : current.is_feiertag } };
-      return { ...prev, [dayId]: { is_urlaub: checked ? false : current.is_urlaub, is_wetter: checked ? false : current.is_wetter, is_feiertag: checked } };
+      if (field === "is_urlaub")
+        return {
+          ...prev,
+          [dayId]: {
+            is_urlaub: checked,
+            is_wetter: checked ? false : current.is_wetter,
+            is_feiertag: checked ? false : current.is_feiertag,
+          },
+        };
+      if (field === "is_wetter")
+        return {
+          ...prev,
+          [dayId]: {
+            is_urlaub: checked ? false : current.is_urlaub,
+            is_wetter: checked,
+            is_feiertag: checked ? false : current.is_feiertag,
+          },
+        };
+      return {
+        ...prev,
+        [dayId]: {
+          is_urlaub: checked ? false : current.is_urlaub,
+          is_wetter: checked ? false : current.is_wetter,
+          is_feiertag: checked,
+        },
+      };
     });
   }
 
@@ -535,7 +683,10 @@ export default function AdminControlPage() {
     return edits[item.id]?.[field] ?? toEditValue(item[field]);
   }
 
-  function getItemText(item: ItemRow, field: "objekt" | "maschine") {
+  function getItemText(
+    item: ItemRow,
+    field: "objekt" | "maschine" | "sonstiges_beschreibung",
+  ) {
     return itemTextEdits[item.id]?.[field] ?? item[field] ?? "";
   }
 
@@ -557,19 +708,40 @@ export default function AdminControlPage() {
     const machine = edit?.machine || komatsuEffectiveMachine(k, machines);
     const obj = edit?.objekt || komatsuEffectiveObject(k);
 
-    const exact = day.items.filter((it) => keyPart(getItemText(it, "maschine")) === keyPart(machine) && keyPart(getItemText(it, "objekt")) === keyPart(obj));
-    const source = exact.length > 0 ? exact : day.items.filter((it) => keyPart(getItemText(it, "maschine")) === keyPart(machine));
+    const exact = day.items.filter(
+      (it) =>
+        keyPart(getItemText(it, "maschine")) === keyPart(machine) &&
+        keyPart(getItemText(it, "objekt")) === keyPart(obj),
+    );
+    const source =
+      exact.length > 0
+        ? exact
+        : day.items.filter(
+            (it) => keyPart(getItemText(it, "maschine")) === keyPart(machine),
+          );
     if (source.length === 0) return null;
 
-    return round1(source.reduce((sum, it) => sum + (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0) + (toNumOrNull(getEdit(it, "motormanuel_h")) ?? 0), 0));
+    return round1(
+      source.reduce(
+        (sum, it) =>
+          sum + (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0),
+        0,
+      ),
+    );
   }
 
   async function createDayAndItem(driver: DriverRow, date: string) {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
-    if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
+    if (!defaultObject)
+      return setMsg(
+        "Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.",
+      );
+    if (!defaultMachine)
+      return setMsg(
+        "Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.",
+      );
 
     setBusy(true);
     setMsg("Tag und Einsatz werden angelegt...");
@@ -577,7 +749,18 @@ export default function AdminControlPage() {
     try {
       const { data: dayData, error: dayErr } = await supabase
         .from("workdays")
-        .insert({ user_id: driver.user_id, date, arbeitsbeginn: null, arbeitsende: null, kommentar: null, is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null })
+        .insert({
+          user_id: driver.user_id,
+          date,
+          arbeitsbeginn: null,
+          arbeitsende: null,
+          kommentar: null,
+          is_urlaub: false,
+          is_wetter: false,
+          is_feiertag: false,
+          is_controlled: false,
+          controlled_at: null,
+        })
         .select("id")
         .single();
 
@@ -596,6 +779,7 @@ export default function AdminControlPage() {
         motormanuel_h: null,
         umsetzen_h: null,
         sonstiges_h: null,
+        sonstiges_beschreibung: null,
         diesel_l: null,
         adblue_l: null,
         kommentar: null,
@@ -618,14 +802,29 @@ export default function AdminControlPage() {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
-    if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
+    if (!defaultObject)
+      return setMsg(
+        "Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.",
+      );
+    if (!defaultMachine)
+      return setMsg(
+        "Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.",
+      );
 
     setBusy(true);
     setMsg("Einsatz wird hinzugefügt...");
 
     try {
-      const { error: dayErr } = await supabase.from("workdays").update({ is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null }).eq("id", day.id);
+      const { error: dayErr } = await supabase
+        .from("workdays")
+        .update({
+          is_urlaub: false,
+          is_wetter: false,
+          is_feiertag: false,
+          is_controlled: false,
+          controlled_at: null,
+        })
+        .eq("id", day.id);
       if (dayErr) throw new Error(dayErr.message);
 
       const { error: itemErr } = await supabase.from("work_items").insert({
@@ -641,6 +840,7 @@ export default function AdminControlPage() {
         motormanuel_h: null,
         umsetzen_h: null,
         sonstiges_h: null,
+        sonstiges_beschreibung: null,
         diesel_l: null,
         adblue_l: null,
         kommentar: null,
@@ -661,17 +861,34 @@ export default function AdminControlPage() {
 
   async function saveItem(item: ItemRow) {
     const e = edits[item.id] ?? {};
-    const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "" };
+    const t = itemTextEdits[item.id] ?? {
+      objekt: item.objekt ?? "",
+      maschine: item.maschine ?? "",
+      sonstiges_beschreibung: item.sonstiges_beschreibung ?? "",
+    };
 
-    const payload: Record<string, any> = { objekt: t.objekt?.trim() || null, maschine: t.maschine?.trim() || null };
-    for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? toEditValue(item[f]));
+    const payload: Record<string, any> = {
+      objekt: t.objekt?.trim() || null,
+      maschine: t.maschine?.trim() || null,
+      sonstiges_beschreibung: t.sonstiges_beschreibung?.trim() || null,
+    };
+    for (const f of NUM_FIELDS)
+      payload[f] = toNumOrNull(e[f] ?? toEditValue(item[f]));
 
-    const { error } = await supabase.from("work_items").update(payload).eq("id", item.id);
+    const { error } = await supabase
+      .from("work_items")
+      .update(payload)
+      .eq("id", item.id);
     if (error) throw new Error(error.message);
   }
 
   async function saveKomatsu(k: KomatsuRow, checked?: boolean) {
-    const e = komatsuEdits[k.id] ?? { driverId: "", machine: "", objekt: "", hours: "" };
+    const e = komatsuEdits[k.id] ?? {
+      driverId: "",
+      machine: "",
+      objekt: "",
+      hours: "",
+    };
     const hours = toNumOrNull(e.hours);
 
     const payload: Record<string, any> = {
@@ -683,11 +900,18 @@ export default function AdminControlPage() {
 
     if (typeof checked === "boolean") payload.is_checked = checked;
 
-    const { error } = await supabase.from("komatsu_hours").update(payload).eq("id", k.id);
+    const { error } = await supabase
+      .from("komatsu_hours")
+      .update(payload)
+      .eq("id", k.id);
     if (error) throw new Error(error.message);
   }
 
-  async function saveDayInternal(day: ControlDay, markControlled: boolean, markKomatsuChecked: boolean) {
+  async function saveDayInternal(
+    day: ControlDay,
+    markControlled: boolean,
+    markKomatsuChecked: boolean,
+  ) {
     for (const item of day.items) await saveItem(item);
 
     const flags = dayFlags[day.id] ?? defaultFlags(day);
@@ -706,15 +930,24 @@ export default function AdminControlPage() {
       payload.controlled_at = new Date().toISOString();
     }
 
-    const { error } = await supabase.from("workdays").update(payload).eq("id", day.id);
+    const { error } = await supabase
+      .from("workdays")
+      .update(payload)
+      .eq("id", day.id);
     if (error) throw new Error(error.message);
 
     const kRows = dayKomatsuRows(day.user_id, day.date);
-    for (const k of kRows) await saveKomatsu(k, markKomatsuChecked ? true : undefined);
+    for (const k of kRows)
+      await saveKomatsu(k, markKomatsuChecked ? true : undefined);
   }
 
   async function saveDayAndMarkControlled(day: ControlDay) {
-    if (!confirm(`${fmtDE(day.date)} von ${day.driverName} speichern und als kontrolliert markieren?`)) return;
+    if (
+      !confirm(
+        `${fmtDE(day.date)} von ${day.driverName} speichern und als kontrolliert markieren?`,
+      )
+    )
+      return;
 
     setBusy(true);
     setMsg("Speichere Kontrolle...");
@@ -731,12 +964,25 @@ export default function AdminControlPage() {
     }
   }
 
-  async function saveWeekAndMarkControlled(group: DriverWeekGroup, weekKey: string) {
-    const existingDays = group.days.map((x) => x.day).filter(Boolean) as ControlDay[];
+  async function saveWeekAndMarkControlled(
+    group: DriverWeekGroup,
+    weekKey: string,
+  ) {
+    const existingDays = group.days
+      .map((x) => x.day)
+      .filter(Boolean) as ControlDay[];
     const orphanKomatsu = group.days.flatMap((x) => (!x.day ? x.komatsu : []));
 
-    if (existingDays.length === 0 && orphanKomatsu.length === 0) return setMsg("Keine vorhandenen Tage oder Komatsu-Zeilen in dieser Woche zum Speichern.");
-    if (!confirm(`${weekKey} für ${group.driverName} speichern und als kontrolliert markieren?`)) return;
+    if (existingDays.length === 0 && orphanKomatsu.length === 0)
+      return setMsg(
+        "Keine vorhandenen Tage oder Komatsu-Zeilen in dieser Woche zum Speichern.",
+      );
+    if (
+      !confirm(
+        `${weekKey} für ${group.driverName} speichern und als kontrolliert markieren?`,
+      )
+    )
+      return;
 
     setBusy(true);
     setMsg("Speichere Woche...");
@@ -751,7 +997,9 @@ export default function AdminControlPage() {
         return next;
       });
 
-      setMsg(`✅ ${weekKey} für ${group.driverName} gespeichert und kontrolliert.`);
+      setMsg(
+        `✅ ${weekKey} für ${group.driverName} gespeichert und kontrolliert.`,
+      );
       await loadData();
     } catch (e: any) {
       setMsg("Fehler: " + (e?.message || String(e)));
@@ -761,12 +1009,16 @@ export default function AdminControlPage() {
   }
 
   async function markUnchecked(day: ControlDay) {
-    if (!confirm(`${fmtDE(day.date)} wieder auf NICHT kontrolliert setzen?`)) return;
+    if (!confirm(`${fmtDE(day.date)} wieder auf NICHT kontrolliert setzen?`))
+      return;
 
     setBusy(true);
     setMsg("Speichere...");
 
-    const { error } = await supabase.from("workdays").update({ is_controlled: false, controlled_at: null }).eq("id", day.id);
+    const { error } = await supabase
+      .from("workdays")
+      .update({ is_controlled: false, controlled_at: null })
+      .eq("id", day.id);
     if (error) {
       setMsg("Fehler: " + error.message);
       setBusy(false);
@@ -792,12 +1044,20 @@ export default function AdminControlPage() {
     const actualByDriverDate = new Map<string, ControlDay>();
     for (const d of days) actualByDriverDate.set(`${d.user_id}__${d.date}`, d);
 
-    const relevantDrivers = (selectedDriver ? drivers.filter((d) => d.user_id === selectedDriver) : drivers).filter((d) => d.is_active !== false);
-    const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? 1 : -1));
+    const relevantDrivers = (
+      selectedDriver
+        ? drivers.filter((d) => d.user_id === selectedDriver)
+        : drivers
+    ).filter((d) => d.is_active !== false);
+    const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) =>
+      a < b ? 1 : -1,
+    );
     const result: WeekGroup[] = [];
 
     for (const weekKey of weekKeys) {
-      const weekDates = (weekDateMap.get(weekKey) ?? []).sort((a, b) => a.localeCompare(b));
+      const weekDates = (weekDateMap.get(weekKey) ?? []).sort((a, b) =>
+        a.localeCompare(b),
+      );
       const driverGroups: DriverWeekGroup[] = [];
 
       for (const driver of relevantDrivers) {
@@ -808,8 +1068,12 @@ export default function AdminControlPage() {
         }));
 
         const hasAnyActualDay = displayDays.some((x) => !!x.day);
-        const hasUncheckedDay = displayDays.some((x) => x.day && !x.day.is_controlled);
-        const hasOpenKomatsu = displayDays.some((x) => x.komatsu.some((k) => !k.is_checked));
+        const hasUncheckedDay = displayDays.some(
+          (x) => x.day && !x.day.is_controlled,
+        );
+        const hasOpenKomatsu = displayDays.some((x) =>
+          x.komatsu.some((k) => !k.is_checked),
+        );
         const hasKomatsu = displayDays.some((x) => x.komatsu.length > 0);
 
         if (onlyUnchecked) {
@@ -818,15 +1082,29 @@ export default function AdminControlPage() {
           if (!hasAnyActualDay && !hasKomatsu && !selectedDriver) continue;
         }
 
-        driverGroups.push({ driver, driverName: driverLabel(driver), days: displayDays });
+        driverGroups.push({
+          driver,
+          driverName: driverLabel(driver),
+          days: displayDays,
+        });
       }
 
-      if (driverGroups.length > 0) result.push({ key: weekKey, drivers: driverGroups });
+      if (driverGroups.length > 0)
+        result.push({ key: weekKey, drivers: driverGroups });
     }
 
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days, drivers, komatsuRows, komatsuEdits, from, to, selectedDriver, onlyUnchecked]);
+  }, [
+    days,
+    drivers,
+    komatsuRows,
+    komatsuEdits,
+    from,
+    to,
+    selectedDriver,
+    onlyUnchecked,
+  ]);
 
   if (admin === null) {
     return (
@@ -843,7 +1121,9 @@ export default function AdminControlPage() {
       <main className="wrap">
         <h1 className="h1">Kontrolle</h1>
         <p className="bad">❌ Du bist kein Admin.</p>
-        <Link href="/app"><button className="btn">Zur Übersicht</button></Link>
+        <Link href="/app">
+          <button className="btn">Zur Übersicht</button>
+        </Link>
         <style jsx>{baseStyles}</style>
       </main>
     );
@@ -854,13 +1134,21 @@ export default function AdminControlPage() {
       <header className="head">
         <div>
           <h1 className="h1">Kontrolle</h1>
-          <div className="sub">Angemeldet als: <b>{meName || "…"}</b></div>
+          <div className="sub">
+            Angemeldet als: <b>{meName || "…"}</b>
+          </div>
         </div>
 
         <div className="topActions">
-          <Link href="/admin"><button className="btn">Admin</button></Link>
-          <Link href="/admin/export"><button className="btn">Export</button></Link>
-          <Link href="/app"><button className="btn">Übersicht</button></Link>
+          <Link href="/admin">
+            <button className="btn">Admin</button>
+          </Link>
+          <Link href="/admin/export">
+            <button className="btn">Export</button>
+          </Link>
+          <Link href="/app">
+            <button className="btn">Übersicht</button>
+          </Link>
         </div>
       </header>
 
@@ -868,16 +1156,50 @@ export default function AdminControlPage() {
         <h2 className="h2">Filter</h2>
 
         <div className="filterGrid">
-          <label className="field">Von<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="control" /></label>
-          <label className="field">Bis<input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="control" /></label>
-          <label className="field">Fahrer
-            <select value={selectedDriver} onChange={(e) => setSelectedDriver(e.target.value)} className="control">
+          <label className="field">
+            Von
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="control"
+            />
+          </label>
+          <label className="field">
+            Bis
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="control"
+            />
+          </label>
+          <label className="field">
+            Fahrer
+            <select
+              value={selectedDriver}
+              onChange={(e) => setSelectedDriver(e.target.value)}
+              className="control"
+            >
               <option value="">Alle Fahrer</option>
-              {drivers.map((d) => <option key={d.user_id} value={d.user_id}>{driverLabel(d)}</option>)}
+              {drivers.map((d) => (
+                <option key={d.user_id} value={d.user_id}>
+                  {driverLabel(d)}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="checkBox"><input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />Nur offen</label>
-          <button onClick={loadData} disabled={busy} className="btnPrimary">{busy ? "Lade..." : "Aktualisieren"}</button>
+          <label className="checkBox">
+            <input
+              type="checkbox"
+              checked={onlyUnchecked}
+              onChange={(e) => setOnlyUnchecked(e.target.checked)}
+            />
+            Nur offen
+          </label>
+          <button onClick={loadData} disabled={busy} className="btnPrimary">
+            {busy ? "Lade..." : "Aktualisieren"}
+          </button>
         </div>
 
         {msg && <pre className="msg">{msg}</pre>}
@@ -886,23 +1208,52 @@ export default function AdminControlPage() {
       <div className="weeks">
         {grouped.map((w, idx) => (
           <details key={w.key} className="weekCard" open={idx === 0}>
-            <summary className="weekSummary"><span className="plus">＋</span><span>{w.key}</span></summary>
+            <summary className="weekSummary">
+              <span className="plus">＋</span>
+              <span>{w.key}</span>
+            </summary>
 
             <div className="drivers">
               {w.drivers.map((driverGroup) => {
-                const existingDays = driverGroup.days.filter((x) => !!x.day).length;
-                const uncheckedDays = driverGroup.days.filter((x) => x.day && !x.day.is_controlled).length;
-                const kOpen = driverGroup.days.reduce((sum, x) => sum + x.komatsu.filter((k) => !k.is_checked).length, 0);
+                const existingDays = driverGroup.days.filter(
+                  (x) => !!x.day,
+                ).length;
+                const uncheckedDays = driverGroup.days.filter(
+                  (x) => x.day && !x.day.is_controlled,
+                ).length;
+                const kOpen = driverGroup.days.reduce(
+                  (sum, x) =>
+                    sum + x.komatsu.filter((k) => !k.is_checked).length,
+                  0,
+                );
 
                 return (
-                  <details key={`${w.key}-${driverGroup.driver.user_id}`} className="driverCard" open>
+                  <details
+                    key={`${w.key}-${driverGroup.driver.user_id}`}
+                    className="driverCard"
+                    open
+                  >
                     <summary className="driverSummary">
                       <span className="plus">＋</span>
                       <span>{driverGroup.driverName}</span>
-                      <span className="driverMeta">{existingDays} Tage · {uncheckedDays} Waldzeit offen · {kOpen} Komatsu offen</span>
+                      <span className="driverMeta">
+                        {existingDays} Tage · {uncheckedDays} Waldzeit offen ·{" "}
+                        {kOpen} Komatsu offen
+                      </span>
                     </summary>
 
-                    <div className="weekActions"><button type="button" onClick={() => saveWeekAndMarkControlled(driverGroup, w.key)} disabled={busy} className="btnPrimary">Woche kontrolliert</button></div>
+                    <div className="weekActions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          saveWeekAndMarkControlled(driverGroup, w.key)
+                        }
+                        disabled={busy}
+                        className="btnPrimary"
+                      >
+                        Woche kontrolliert
+                      </button>
+                    </div>
 
                     <div className="days">
                       {driverGroup.days.map((display) => {
@@ -910,103 +1261,470 @@ export default function AdminControlPage() {
 
                         if (!d) {
                           return (
-                            <div key={display.date} className={display.komatsu.length > 0 ? "missingDay hasKomatsu" : "missingDay"}>
+                            <div
+                              key={display.date}
+                              className={
+                                display.komatsu.length > 0
+                                  ? "missingDay hasKomatsu"
+                                  : "missingDay"
+                              }
+                            >
                               <div>
-                                <b>{weekdayDE(display.date)} {fmtDE(display.date)}</b>
-                                <div className="small">Kein Waldzeit-Eintrag {display.komatsu.length > 0 ? `· ${display.komatsu.length} Komatsu-Zeile(n)` : ""}</div>
-                                {display.komatsu.length > 0 && <KomatsuCompactList rows={display.komatsu} edits={komatsuEdits} drivers={drivers} machines={machines} objects={objects} updateKomatsuEdit={updateKomatsuEdit} saveKomatsu={saveKomatsu} busy={busy} />}
+                                <b>
+                                  {weekdayDE(display.date)}{" "}
+                                  {fmtDE(display.date)}
+                                </b>
+                                <div className="small">
+                                  Kein Waldzeit-Eintrag{" "}
+                                  {display.komatsu.length > 0
+                                    ? `· ${display.komatsu.length} Komatsu-Zeile(n)`
+                                    : ""}
+                                </div>
+                                {display.komatsu.length > 0 && (
+                                  <KomatsuCompactList
+                                    rows={display.komatsu}
+                                    edits={komatsuEdits}
+                                    drivers={drivers}
+                                    machines={machines}
+                                    objects={objects}
+                                    updateKomatsuEdit={updateKomatsuEdit}
+                                    saveKomatsu={saveKomatsu}
+                                    busy={busy}
+                                  />
+                                )}
                               </div>
 
-                              <button type="button" onClick={() => createDayAndItem(driverGroup.driver, display.date)} disabled={busy} className="btn">+ Eintrag</button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  createDayAndItem(
+                                    driverGroup.driver,
+                                    display.date,
+                                  )
+                                }
+                                disabled={busy}
+                                className="btn"
+                              >
+                                + Eintrag
+                              </button>
                             </div>
                           );
                         }
 
-                        const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
+                        const arbeitszeit = timeDiffHours(
+                          d.arbeitsbeginn,
+                          d.arbeitsende,
+                        );
                         const geleistet = sumWorkedHoursLive(d.items, edits);
-                        const kTotal = round1(display.komatsu.reduce((sum, k) => sum + (toNumOrNull(komatsuEdits[k.id]?.hours ?? toEditValue(komatsuHours(k))) ?? 0), 0));
-                        const diffKomatsu = kTotal === null ? null : round1(geleistet - kTotal);
-                        const diffArbeitszeit = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
+                        const masTotal = sumMasHoursLive(d.items, edits);
+                        const kTotal = round1(
+                          display.komatsu.reduce(
+                            (sum, k) =>
+                              sum +
+                              (toNumOrNull(
+                                komatsuEdits[k.id]?.hours ??
+                                  toEditValue(komatsuHours(k)),
+                              ) ?? 0),
+                            0,
+                          ),
+                        );
+                        const diffKomatsu =
+                          kTotal === null ? null : round1(masTotal - kTotal);
+                        const diffArbeitszeit =
+                          arbeitszeit === null
+                            ? null
+                            : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? defaultFlags(d);
                         const isOpen = openDays[d.id] ?? false;
 
                         return (
-                          <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"} open={isOpen} onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}>
+                          <details
+                            key={d.id}
+                            className={
+                              d.is_controlled ? "dayCard controlled" : "dayCard"
+                            }
+                            open={isOpen}
+                            onToggle={(e) =>
+                              setDayOpen(
+                                d.id,
+                                (e.currentTarget as HTMLDetailsElement).open,
+                              )
+                            }
+                          >
                             <summary className="daySummary">
                               <div className="dayMain">
-                                <b>{weekdayDE(d.date)} {fmtDE(d.date)}</b>
-                                <span className="miniStats">AZ {format1(arbeitszeit)}h · Wald {format1(geleistet)}h · Komatsu {format1(kTotal)}h · Diff K {format1(diffKomatsu)}h</span>
+                                <b>
+                                  {weekdayDE(d.date)} {fmtDE(d.date)}
+                                </b>
+                                <span className="miniStats">
+                                  AZ {format1(arbeitszeit)}h · Gesamt{" "}
+                                  {format1(geleistet)}h · MAS{" "}
+                                  {format1(masTotal)}h · K {format1(kTotal)}h ·
+                                  Diff K {format1(diffKomatsu)}h
+                                </span>
                               </div>
 
                               <div className="badges">
-                                {flags.is_urlaub && <span className="badge green">Urlaub</span>}
-                                {flags.is_wetter && <span className="badge blue">Wetter</span>}
-                                {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
-                                {display.komatsu.length > 0 && <span className="badge komatsu">K {display.komatsu.length}</span>}
-                                {d.is_controlled && <span className="badge done">OK</span>}
+                                {flags.is_urlaub && (
+                                  <span className="badge green">Urlaub</span>
+                                )}
+                                {flags.is_wetter && (
+                                  <span className="badge blue">Wetter</span>
+                                )}
+                                {flags.is_feiertag && (
+                                  <span className="badge holiday">
+                                    Feiertag
+                                  </span>
+                                )}
+                                {display.komatsu.length > 0 && (
+                                  <span className="badge komatsu">
+                                    K {display.komatsu.length}
+                                  </span>
+                                )}
+                                {d.is_controlled && (
+                                  <span className="badge done">OK</span>
+                                )}
                               </div>
                             </summary>
 
                             <div className="compareBox">
-                              <div><b>Datum</b><br /><input type="date" value={dateEdits[d.id] ?? d.date} onChange={(e) => setDateEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} /></div>
-                              <div><b>Arbeitszeit</b><br />{format1(arbeitszeit)} h <span className="small">{d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}</span></div>
-                              <div><b>Waldzeit</b><br />{format1(geleistet)} h <span className="small">ohne Fahrt</span></div>
-                              <div className={diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25 ? "diffWarn" : "diffOk"}><b>Diff AZ</b><br />{format1(diffArbeitszeit)} h</div>
-                              <div><b>Komatsu</b><br />{format1(kTotal)} h</div>
-                              <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><br />{format1(diffKomatsu)} h</div>
+                              <div>
+                                <b>Datum</b>
+                                <br />
+                                <input
+                                  type="date"
+                                  value={dateEdits[d.id] ?? d.date}
+                                  onChange={(e) =>
+                                    setDateEdits((prev) => ({
+                                      ...prev,
+                                      [d.id]: e.target.value,
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <div>
+                                <b>Arbeitszeit</b>
+                                <br />
+                                {format1(arbeitszeit)} h{" "}
+                                <span className="small">
+                                  {d.arbeitsbeginn || "--:--"} -{" "}
+                                  {d.arbeitsende || "--:--"}
+                                </span>
+                              </div>
+                              <div>
+                                <b>Gesamt</b>
+                                <br />
+                                {format1(geleistet)} h{" "}
+                                <span className="small">
+                                  ohne Fahrt · Diff AZ{" "}
+                                  {format1(diffArbeitszeit)} h
+                                </span>
+                              </div>
+                              <div>
+                                <b>MAS h</b>
+                                <br />
+                                {format1(masTotal)} h
+                              </div>
+                              <div>
+                                <b>Komatsu</b>
+                                <br />
+                                {format1(kTotal)} h
+                              </div>
+                              <div
+                                className={
+                                  diffKomatsu !== null &&
+                                  Math.abs(diffKomatsu) > 0.5
+                                    ? "diffWarn"
+                                    : "diffOk"
+                                }
+                              >
+                                <b>Diff K zu MAS</b>
+                                <br />
+                                {format1(diffKomatsu)} h
+                              </div>
                             </div>
 
                             <div className="flagsRow">
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />Urlaub</label>
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />Wetter</label>
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />Feiertag</label>
-                              <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">+ Einsatz hinzufügen</button>
+                              <label className="flagBox">
+                                <input
+                                  type="checkbox"
+                                  checked={flags.is_urlaub}
+                                  onChange={(e) =>
+                                    updateDayFlag(
+                                      d.id,
+                                      "is_urlaub",
+                                      e.target.checked,
+                                    )
+                                  }
+                                />
+                                Urlaub
+                              </label>
+                              <label className="flagBox">
+                                <input
+                                  type="checkbox"
+                                  checked={flags.is_wetter}
+                                  onChange={(e) =>
+                                    updateDayFlag(
+                                      d.id,
+                                      "is_wetter",
+                                      e.target.checked,
+                                    )
+                                  }
+                                />
+                                Wetter
+                              </label>
+                              <label className="flagBox">
+                                <input
+                                  type="checkbox"
+                                  checked={flags.is_feiertag}
+                                  onChange={(e) =>
+                                    updateDayFlag(
+                                      d.id,
+                                      "is_feiertag",
+                                      e.target.checked,
+                                    )
+                                  }
+                                />
+                                Feiertag
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => addItemToDay(d)}
+                                disabled={busy}
+                                className="btn"
+                              >
+                                + Einsatz hinzufügen
+                              </button>
                             </div>
 
-                            <label className="commentEdit">Tageskommentar
-                              <textarea value={commentEdits[d.id] ?? ""} onChange={(e) => setCommentEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} placeholder="Tageskommentar..." />
+                            <label className="commentEdit">
+                              Tageskommentar
+                              <textarea
+                                value={commentEdits[d.id] ?? ""}
+                                onChange={(e) =>
+                                  setCommentEdits((prev) => ({
+                                    ...prev,
+                                    [d.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Tageskommentar..."
+                              />
                             </label>
 
                             {display.komatsu.length > 0 && (
                               <section className="komatsuBox">
                                 <h3>Komatsu-Abgleich</h3>
-                                <KomatsuCompactList rows={display.komatsu} edits={komatsuEdits} drivers={drivers} machines={machines} objects={objects} updateKomatsuEdit={updateKomatsuEdit} saveKomatsu={saveKomatsu} busy={busy} day={d} matchingWaldzeitHours={matchingWaldzeitHours} />
+                                <KomatsuCompactList
+                                  rows={display.komatsu}
+                                  edits={komatsuEdits}
+                                  drivers={drivers}
+                                  machines={machines}
+                                  objects={objects}
+                                  updateKomatsuEdit={updateKomatsuEdit}
+                                  saveKomatsu={saveKomatsu}
+                                  busy={busy}
+                                  day={d}
+                                  matchingWaldzeitHours={matchingWaldzeitHours}
+                                />
                               </section>
                             )}
 
-                            {d.items.length === 0 ? <div className="empty">Keine Waldzeit-Einsätze</div> : (
+                            {d.items.length === 0 ? (
+                              <div className="empty">
+                                Keine Waldzeit-Einsätze
+                              </div>
+                            ) : (
                               <div className="items">
                                 {d.items.map((it, itemIdx) => (
                                   <div key={it.id} className="itemRow">
-                                    <div className="itemHead"><b>Waldzeit Einsatz {itemIdx + 1}</b><span>{format1(workItemHours(it))} h gespeichert</span></div>
+                                    <div className="itemHead">
+                                      <b>Waldzeit Einsatz {itemIdx + 1}</b>
+                                      <span>
+                                        {format1(workItemHours(it))} h
+                                        gespeichert
+                                      </span>
+                                    </div>
 
                                     <div className="selectGrid">
-                                      <label className="selectField">Objekt<select value={getItemText(it, "objekt")} onChange={(e) => updateItemText(it.id, "objekt", e.target.value)}><option value="">Ohne Objekt</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
-                                      <label className="selectField">Maschine<select value={getItemText(it, "maschine")} onChange={(e) => updateItemText(it.id, "maschine", e.target.value)}><option value="">Ohne Maschine</option>{machines.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}</select></label>
+                                      <label className="selectField">
+                                        Objekt
+                                        <select
+                                          value={getItemText(it, "objekt")}
+                                          onChange={(e) =>
+                                            updateItemText(
+                                              it.id,
+                                              "objekt",
+                                              e.target.value,
+                                            )
+                                          }
+                                        >
+                                          <option value="">Ohne Objekt</option>
+                                          {objects.map((o) => (
+                                            <option key={o.id} value={o.name}>
+                                              {o.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <label className="selectField">
+                                        Maschine
+                                        <select
+                                          value={getItemText(it, "maschine")}
+                                          onChange={(e) =>
+                                            updateItemText(
+                                              it.id,
+                                              "maschine",
+                                              e.target.value,
+                                            )
+                                          }
+                                        >
+                                          <option value="">
+                                            Ohne Maschine
+                                          </option>
+                                          {machines.map((m) => (
+                                            <option key={m.id} value={m.name}>
+                                              {m.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
                                     </div>
 
                                     <div className="editGrid">
-                                      <NumberInput label="Fahrt" value={getEdit(it, "fahrtzeit_min")} onChange={(v) => updateEdit(it.id, "fahrtzeit_min", v)} />
-                                      <NumberInput label="MAS Start" value={getEdit(it, "mas_start")} onChange={(v) => updateEdit(it.id, "mas_start", v)} />
-                                      <NumberInput label="MAS Ende" value={getEdit(it, "mas_end")} onChange={(v) => updateEdit(it.id, "mas_end", v)} />
-                                      <NumberInput label="MAS h" value={getEdit(it, "maschinenstunden_h")} onChange={(v) => updateEdit(it.id, "maschinenstunden_h", v)} />
-                                      <NumberInput label="Unterh." value={getEdit(it, "unterhalt_h")} onChange={(v) => updateEdit(it.id, "unterhalt_h", v)} />
-                                      <NumberInput label="Rep." value={getEdit(it, "reparatur_h")} onChange={(v) => updateEdit(it.id, "reparatur_h", v)} />
-                                      <NumberInput label="Motor." value={getEdit(it, "motormanuel_h")} onChange={(v) => updateEdit(it.id, "motormanuel_h", v)} />
-                                      <NumberInput label="Umsetz." value={getEdit(it, "umsetzen_h")} onChange={(v) => updateEdit(it.id, "umsetzen_h", v)} />
-                                      <NumberInput label="Sonst." value={getEdit(it, "sonstiges_h")} onChange={(v) => updateEdit(it.id, "sonstiges_h", v)} />
-                                      <NumberInput label="Diesel" value={getEdit(it, "diesel_l")} onChange={(v) => updateEdit(it.id, "diesel_l", v)} />
-                                      <NumberInput label="AdBlue" value={getEdit(it, "adblue_l")} onChange={(v) => updateEdit(it.id, "adblue_l", v)} />
-                                      <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
+                                      <NumberInput
+                                        label="Fahrt"
+                                        value={getEdit(it, "fahrtzeit_min")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "fahrtzeit_min", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="MAS Start"
+                                        value={getEdit(it, "mas_start")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "mas_start", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="MAS Ende"
+                                        value={getEdit(it, "mas_end")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "mas_end", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="MAS h"
+                                        value={getEdit(
+                                          it,
+                                          "maschinenstunden_h",
+                                        )}
+                                        onChange={(v) =>
+                                          updateEdit(
+                                            it.id,
+                                            "maschinenstunden_h",
+                                            v,
+                                          )
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Unterh."
+                                        value={getEdit(it, "unterhalt_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "unterhalt_h", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Rep."
+                                        value={getEdit(it, "reparatur_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "reparatur_h", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Motor."
+                                        value={getEdit(it, "motormanuel_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "motormanuel_h", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Umsetz."
+                                        value={getEdit(it, "umsetzen_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "umsetzen_h", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Sonst."
+                                        value={getEdit(it, "sonstiges_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "sonstiges_h", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Diesel"
+                                        value={getEdit(it, "diesel_l")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "diesel_l", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="AdBlue"
+                                        value={getEdit(it, "adblue_l")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "adblue_l", v)
+                                        }
+                                      />
+                                      <NumberInput
+                                        label="Twinch"
+                                        value={getEdit(it, "twinch_h")}
+                                        onChange={(v) =>
+                                          updateEdit(it.id, "twinch_h", v)
+                                        }
+                                      />
                                     </div>
+
+                                    <label className="miscNote">
+                                      Sonstiges Bemerkung
+                                      <input
+                                        value={getItemText(
+                                          it,
+                                          "sonstiges_beschreibung",
+                                        )}
+                                        onChange={(e) =>
+                                          updateItemText(
+                                            it.id,
+                                            "sonstiges_beschreibung",
+                                            e.target.value,
+                                          )
+                                        }
+                                        placeholder="z.B. Umsetzen, Wartezeit, Sonderarbeit..."
+                                      />
+                                    </label>
                                   </div>
                                 ))}
                               </div>
                             )}
 
                             <div className="dayActions">
-                              <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">Speichern + kontrolliert</button>
-                              {d.is_controlled && <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">Wieder öffnen</button>}
+                              <button
+                                type="button"
+                                onClick={() => saveDayAndMarkControlled(d)}
+                                disabled={busy}
+                                className="btnPrimary"
+                              >
+                                Speichern + kontrolliert
+                              </button>
+                              {d.is_controlled && (
+                                <button
+                                  type="button"
+                                  onClick={() => markUnchecked(d)}
+                                  disabled={busy}
+                                  className="btn"
+                                >
+                                  Wieder öffnen
+                                </button>
+                              )}
                             </div>
                           </details>
                         );
@@ -1019,7 +1737,9 @@ export default function AdminControlPage() {
           </details>
         ))}
 
-        {grouped.length === 0 && <div className="card">Keine Daten im gewählten Zeitraum.</div>}
+        {grouped.length === 0 && (
+          <div className="card">Keine Daten im gewählten Zeitraum.</div>
+        )}
       </div>
 
       <style jsx>{baseStyles}</style>
@@ -1027,38 +1747,154 @@ export default function AdminControlPage() {
   );
 }
 
-function NumberInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return <label className="numField">{label}<input value={value} onChange={(e) => onChange(e.target.value)} inputMode="decimal" /></label>;
+function NumberInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="numField">
+      {label}
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        inputMode="decimal"
+      />
+    </label>
+  );
 }
 
-function KomatsuCompactList({ rows, edits, drivers, machines, objects, updateKomatsuEdit, saveKomatsu, busy, day, matchingWaldzeitHours }: {
+function KomatsuCompactList({
+  rows,
+  edits,
+  drivers,
+  machines,
+  objects,
+  updateKomatsuEdit,
+  saveKomatsu,
+  busy,
+  day,
+  matchingWaldzeitHours,
+}: {
   rows: KomatsuRow[];
-  edits: Record<string, { driverId: string; machine: string; objekt: string; hours: string }>;
+  edits: Record<
+    string,
+    { driverId: string; machine: string; objekt: string; hours: string }
+  >;
   drivers: DriverRow[];
   machines: OptionRow[];
   objects: OptionRow[];
-  updateKomatsuEdit: (id: string, field: "driverId" | "machine" | "objekt" | "hours", value: string) => void;
+  updateKomatsuEdit: (
+    id: string,
+    field: "driverId" | "machine" | "objekt" | "hours",
+    value: string,
+  ) => void;
   saveKomatsu: (k: KomatsuRow, checked?: boolean) => Promise<void>;
   busy: boolean;
   day?: ControlDay;
-  matchingWaldzeitHours?: (day: ControlDay | null, k: KomatsuRow) => number | null;
+  matchingWaldzeitHours?: (
+    day: ControlDay | null,
+    k: KomatsuRow,
+  ) => number | null;
 }) {
   return (
     <div className="kRows">
       {rows.map((k) => {
-        const e = edits[k.id] ?? { driverId: "", machine: "", objekt: "", hours: "" };
-        const wald = matchingWaldzeitHours && day ? matchingWaldzeitHours(day, k) : null;
-        const diff = wald === null ? null : round1(wald - (toNumOrNull(e.hours) ?? 0));
+        const e = edits[k.id] ?? {
+          driverId: "",
+          machine: "",
+          objekt: "",
+          hours: "",
+        };
+        const wald =
+          matchingWaldzeitHours && day ? matchingWaldzeitHours(day, k) : null;
+        const diff =
+          wald === null ? null : round1(wald - (toNumOrNull(e.hours) ?? 0));
         return (
           <div key={k.id} className="kRow">
-            <div className="kTop"><b>{format1(toNumOrNull(e.hours))} h</b><span>Objekt Komatsu: {k.object_name || "-"}</span>{diff !== null && <span className={Math.abs(diff) > 0.5 ? "diffWarn" : "diffOk"}>Diff {format1(diff)}h</span>}</div>
-            <div className="kGrid">
-              <label>Fahrer<select value={e.driverId} onChange={(ev) => updateKomatsuEdit(k.id, "driverId", ev.target.value)}><option value="">?</option>{drivers.map((d) => <option key={d.user_id} value={d.user_id}>{driverLabel(d)}</option>)}</select></label>
-              <label>Maschine<select value={e.machine} onChange={(ev) => updateKomatsuEdit(k.id, "machine", ev.target.value)}><option value="">?</option>{machines.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}</select></label>
-              <label>Objekt<select value={e.objekt} onChange={(ev) => updateKomatsuEdit(k.id, "objekt", ev.target.value)}><option value="">?</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
-              <label>h<input value={e.hours} inputMode="decimal" onChange={(ev) => updateKomatsuEdit(k.id, "hours", ev.target.value)} /></label>
+            <div className="kTop">
+              <b>{format1(toNumOrNull(e.hours))} h</b>
+              <span>Objekt Komatsu: {k.object_name || "-"}</span>
+              {diff !== null && (
+                <span className={Math.abs(diff) > 0.5 ? "diffWarn" : "diffOk"}>
+                  Diff zu MAS {format1(diff)}h
+                </span>
+              )}
             </div>
-            <div className="kActions"><button type="button" className="btn" disabled={busy} onClick={() => saveKomatsu(k)}>Komatsu speichern</button><button type="button" className="btnPrimary" disabled={busy} onClick={() => saveKomatsu(k, true)}>Komatsu OK</button></div>
+            <div className="kGrid">
+              <label>
+                Fahrer
+                <select
+                  value={e.driverId}
+                  onChange={(ev) =>
+                    updateKomatsuEdit(k.id, "driverId", ev.target.value)
+                  }
+                >
+                  <option value="">?</option>
+                  {drivers.map((d) => (
+                    <option key={d.user_id} value={d.user_id}>
+                      {driverLabel(d)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Maschine
+                <select
+                  value={e.machine}
+                  onChange={(ev) =>
+                    updateKomatsuEdit(k.id, "machine", ev.target.value)
+                  }
+                >
+                  <option value="">?</option>
+                  {machines.map((m) => (
+                    <option key={m.id} value={m.name}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Objekt
+                <select
+                  value={e.objekt}
+                  onChange={(ev) =>
+                    updateKomatsuEdit(k.id, "objekt", ev.target.value)
+                  }
+                >
+                  <option value="">?</option>
+                  {objects.map((o) => (
+                    <option key={o.id} value={o.name}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                h
+                <input
+                  value={e.hours}
+                  inputMode="decimal"
+                  onChange={(ev) =>
+                    updateKomatsuEdit(k.id, "hours", ev.target.value)
+                  }
+                />
+              </label>
+            </div>
+            <div className="kActions">
+              <button
+                type="button"
+                className="btnPrimary"
+                disabled={busy}
+                onClick={() => saveKomatsu(k, true)}
+              >
+                Kontrolle abgeschlossen
+              </button>
+            </div>
           </div>
         );
       })}
@@ -1080,7 +1916,7 @@ const baseStyles = `
 .compareBox{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}.compareBox input{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px}.diffWarn{color:crimson;font-weight:900}.diffOk{color:green;font-weight:900}.small{font-size:11px;opacity:.72}
 .flagsRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.flagBox{display:flex;gap:6px;align-items:center;border:1px solid #eee;border-radius:10px;padding:7px 10px;background:#fff;font-weight:900;font-size:13px}.commentEdit{display:block;margin-top:8px;font-weight:800;font-size:13px}.commentEdit textarea{width:100%;min-height:48px;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:10px;font-size:14px;box-sizing:border-box}
 .komatsuBox{border:1px solid #eee;border-radius:12px;margin-top:8px;padding:8px;background:#fff}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.1fr 1fr 1.3fr .5fr;gap:6px;margin-top:6px}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.kActions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
-.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.miscNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.miscNote input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 @media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary{width:100%}.missingDay{font-size:13px;padding:7px}}
 @media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.kActions .btn,.kActions .btnPrimary{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
 `;
