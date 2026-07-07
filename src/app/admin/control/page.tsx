@@ -16,6 +16,7 @@ type OptionRow = {
   id: string;
   name: string;
   is_active?: boolean | null;
+  serial_number?: string | null;
 };
 
 type DayRow = {
@@ -53,15 +54,29 @@ type ItemRow = {
   twinch_h: number | null;
 };
 
+type KomatsuRow = {
+  id: string;
+  import_name: string | null;
+  serial_number: string | null;
+  machine_name: string | null;
+  corrected_machine_name: string | null;
+  driver_name: string | null;
+  corrected_driver_id: string | null;
+  date: string;
+  object_name: string | null;
+  corrected_object_name: string | null;
+  motor_runtime_h: number | null;
+  effective_work_h: number | null;
+  motorstunden: number | null;
+  is_checked: boolean | null;
+};
+
 type ControlDay = DayRow & {
   driverName: string;
   items: ItemRow[];
 };
 
-type DisplayDay = {
-  date: string;
-  day: ControlDay | null;
-};
+type DisplayDay = { date: string; day: ControlDay | null; komatsu: KomatsuRow[] };
 
 type DriverWeekGroup = {
   driver: DriverRow;
@@ -116,7 +131,7 @@ async function isAdmin() {
 }
 
 function round1(v: number | null | undefined) {
-  if (v === null || v === undefined) return null;
+  if (v === null || v === undefined || !Number.isFinite(v)) return null;
   return Math.round(v * 10) / 10;
 }
 
@@ -194,6 +209,18 @@ function toNumOrNull(v: string) {
   return round1(n);
 }
 
+function norm(s: any) {
+  return String(s ?? "").trim();
+}
+
+function keyPart(s: any) {
+  return norm(s).toLowerCase();
+}
+
+function driverLabel(d: DriverRow) {
+  return d.full_name?.trim() || d.username?.trim() || d.user_id;
+}
+
 function sortByLastname(a: DriverRow, b: DriverRow) {
   const getLast = (name: string | null) => {
     const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
@@ -202,7 +229,6 @@ function sortByLastname(a: DriverRow, b: DriverRow) {
 
   const cmp = getLast(a.full_name).localeCompare(getLast(b.full_name), "de", { sensitivity: "base" });
   if (cmp !== 0) return cmp;
-
   return String(a.full_name || "").localeCompare(String(b.full_name || ""), "de", { sensitivity: "base" });
 }
 
@@ -220,16 +246,61 @@ function timeDiffHours(start: string | null, end: string | null) {
   return round1((endMin - startMin) / 60);
 }
 
-function driverLabel(d: DriverRow) {
-  return d.full_name?.trim() || d.username?.trim() || d.user_id;
-}
-
 function defaultFlags(day?: Partial<DayRow> | null): DayFlags {
   return {
     is_urlaub: !!day?.is_urlaub,
     is_wetter: !!day?.is_wetter,
     is_feiertag: !!day?.is_feiertag,
   };
+}
+
+function komatsuHours(k: KomatsuRow) {
+  return round1(k.motor_runtime_h ?? k.effective_work_h ?? k.motorstunden ?? null);
+}
+
+function komatsuEffectiveDriverId(k: KomatsuRow, drivers: DriverRow[]) {
+  if (k.corrected_driver_id) return k.corrected_driver_id;
+  const raw = keyPart(k.driver_name);
+  if (!raw) return "";
+  const exact = drivers.find((d) => keyPart(driverLabel(d)) === raw);
+  if (exact) return exact.user_id;
+  const contains = drivers.find((d) => keyPart(driverLabel(d)).includes(raw) || raw.includes(keyPart(driverLabel(d))));
+  return contains?.user_id ?? "";
+}
+
+function komatsuEffectiveMachine(k: KomatsuRow, machines: OptionRow[]) {
+  const corrected = norm(k.corrected_machine_name);
+  if (corrected) return corrected;
+  const serial = norm(k.serial_number);
+  if (serial) {
+    const m = machines.find((x) => norm(x.serial_number) === serial);
+    if (m?.name) return m.name;
+  }
+  return norm(k.machine_name);
+}
+
+function komatsuEffectiveObject(k: KomatsuRow) {
+  return norm(k.corrected_object_name) || norm(k.object_name);
+}
+
+function workItemHours(it: ItemRow) {
+  return round1(
+    Number(it.maschinenstunden_h ?? 0) +
+      Number(it.unterhalt_h ?? 0) +
+      Number(it.reparatur_h ?? 0) +
+      Number(it.motormanuel_h ?? 0) +
+      Number(it.umsetzen_h ?? 0) +
+      Number(it.sonstiges_h ?? 0)
+  ) ?? 0;
+}
+
+function sumWorkedHoursLive(items: ItemRow[], edits: Record<string, Partial<Record<NumField, string>>>) {
+  const total = items.reduce((sum, it) => {
+    const get = (field: NumField) => toNumOrNull(edits[it.id]?.[field] ?? toEditValue(it[field])) ?? 0;
+    return sum + get("maschinenstunden_h") + get("unterhalt_h") + get("reparatur_h") + get("motormanuel_h") + get("umsetzen_h") + get("sonstiges_h");
+  }, 0);
+
+  return round1(total) ?? 0;
 }
 
 export default function AdminControlPage() {
@@ -245,13 +316,17 @@ export default function AdminControlPage() {
   const [objects, setObjects] = useState<OptionRow[]>([]);
   const [machines, setMachines] = useState<OptionRow[]>([]);
   const [days, setDays] = useState<ControlDay[]>([]);
+  const [komatsuRows, setKomatsuRows] = useState<KomatsuRow[]>([]);
 
   const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
 
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
   const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string }>>({});
   const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
+  const [dateEdits, setDateEdits] = useState<Record<string, string>>({});
   const [dayFlags, setDayFlags] = useState<Record<string, DayFlags>>({});
+
+  const [komatsuEdits, setKomatsuEdits] = useState<Record<string, { driverId: string; machine: string; objekt: string; hours: string }>>({});
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -265,10 +340,8 @@ export default function AdminControlPage() {
       }
 
       setMeName(me.firstName || me.email || "");
-
       const ok = await isAdmin();
       setAdmin(ok);
-
       if (ok) await loadData();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -281,31 +354,22 @@ export default function AdminControlPage() {
     const [dRes, objRes, machRes] = await Promise.all([
       supabase.from("driver_profiles").select("user_id,username,full_name,is_active").order("full_name", { ascending: true }),
       supabase.from("objects").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
-      supabase.from("machines").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
+      supabase.from("machines").select("id,name,is_active,serial_number").eq("is_active", true).order("name", { ascending: true }),
     ]);
 
-    if (dRes.error) {
+    if (dRes.error || objRes.error || machRes.error) {
       setBusy(false);
-      setMsg("Fehler Fahrer laden: " + dRes.error.message);
-      return;
-    }
-
-    if (objRes.error) {
-      setBusy(false);
-      setMsg("Fehler Objekte laden: " + objRes.error.message);
-      return;
-    }
-
-    if (machRes.error) {
-      setBusy(false);
-      setMsg("Fehler Maschinen laden: " + machRes.error.message);
+      setMsg(`Fehler Stammdaten laden. ${dRes.error?.message || objRes.error?.message || machRes.error?.message || ""}`);
       return;
     }
 
     const driverRows = (((dRes.data as any[]) ?? []) as DriverRow[]).sort(sortByLastname);
+    const objectRows = (((objRes.data as any[]) ?? []) as OptionRow[]);
+    const machineRows = (((machRes.data as any[]) ?? []) as OptionRow[]);
+
     setDrivers(driverRows);
-    setObjects(((objRes.data as any[]) ?? []) as OptionRow[]);
-    setMachines(((machRes.data as any[]) ?? []) as OptionRow[]);
+    setObjects(objectRows);
+    setMachines(machineRows);
 
     const driverMap = new Map<string, string>();
     for (const d of driverRows) driverMap.set(d.user_id, driverLabel(d));
@@ -320,7 +384,6 @@ export default function AdminControlPage() {
     if (selectedDriver) q = q.eq("user_id", selectedDriver);
 
     const dayRes = await q;
-
     if (dayRes.error) {
       setBusy(false);
       setMsg("Fehler Tage laden: " + dayRes.error.message);
@@ -347,6 +410,19 @@ export default function AdminControlPage() {
       }
 
       itemRows = ((itemRes.data as any[]) ?? []) as ItemRow[];
+    }
+
+    const kRes = await supabase
+      .from("komatsu_hours")
+      .select("id,import_name,serial_number,machine_name,corrected_machine_name,driver_name,corrected_driver_id,date,object_name,corrected_object_name,motor_runtime_h,effective_work_h,motorstunden,is_checked")
+      .gte("date", from)
+      .lte("date", to)
+      .order("date", { ascending: false });
+
+    if (kRes.error) {
+      setBusy(false);
+      setMsg("Fehler Komatsu laden: " + kRes.error.message);
+      return;
     }
 
     const itemMap = new Map<string, ItemRow[]>();
@@ -376,18 +452,41 @@ export default function AdminControlPage() {
     }
 
     const nextComments: Record<string, string> = {};
+    const nextDates: Record<string, string> = {};
     const nextFlags: Record<string, DayFlags> = {};
 
     for (const day of finalDays) {
       nextComments[day.id] = day.kommentar ?? "";
+      nextDates[day.id] = day.date;
       nextFlags[day.id] = defaultFlags(day);
     }
 
+    const rawKomatsu = (((kRes.data as any[]) ?? []) as KomatsuRow[]).filter((k) => {
+      const h = komatsuHours(k);
+      if (h === null || h < 1) return false;
+      if (onlyUnchecked && k.is_checked) return false;
+      if (selectedDriver) return komatsuEffectiveDriverId(k, driverRows) === selectedDriver;
+      return true;
+    });
+
+    const nextKomatsuEdits: Record<string, { driverId: string; machine: string; objekt: string; hours: string }> = {};
+    for (const k of rawKomatsu) {
+      nextKomatsuEdits[k.id] = {
+        driverId: komatsuEffectiveDriverId(k, driverRows),
+        machine: komatsuEffectiveMachine(k, machineRows),
+        objekt: komatsuEffectiveObject(k),
+        hours: toEditValue(komatsuHours(k)),
+      };
+    }
+
     setDays(finalDays);
+    setKomatsuRows(rawKomatsu);
     setEdits(nextEdits);
     setItemTextEdits(nextTextEdits);
     setCommentEdits(nextComments);
+    setDateEdits(nextDates);
     setDayFlags(nextFlags);
+    setKomatsuEdits(nextKomatsuEdits);
     setMsg("");
     setBusy(false);
   }
@@ -412,44 +511,23 @@ export default function AdminControlPage() {
     }));
   }
 
+  function updateKomatsuEdit(id: string, field: "driverId" | "machine" | "objekt" | "hours", value: string) {
+    setKomatsuEdits((prev) => ({
+      ...prev,
+      [id]: {
+        ...(prev[id] ?? { driverId: "", machine: "", objekt: "", hours: "" }),
+        [field]: value,
+      },
+    }));
+  }
+
   function updateDayFlag(dayId: string, field: "is_urlaub" | "is_wetter" | "is_feiertag", checked: boolean) {
     setDayFlags((prev) => {
-      const current = prev[dayId] ?? {
-        is_urlaub: false,
-        is_wetter: false,
-        is_feiertag: false,
-      };
+      const current = prev[dayId] ?? { is_urlaub: false, is_wetter: false, is_feiertag: false };
 
-      if (field === "is_urlaub") {
-        return {
-          ...prev,
-          [dayId]: {
-            is_urlaub: checked,
-            is_wetter: checked ? false : current.is_wetter,
-            is_feiertag: checked ? false : current.is_feiertag,
-          },
-        };
-      }
-
-      if (field === "is_wetter") {
-        return {
-          ...prev,
-          [dayId]: {
-            is_urlaub: checked ? false : current.is_urlaub,
-            is_wetter: checked,
-            is_feiertag: checked ? false : current.is_feiertag,
-          },
-        };
-      }
-
-      return {
-        ...prev,
-        [dayId]: {
-          is_urlaub: checked ? false : current.is_urlaub,
-          is_wetter: checked ? false : current.is_wetter,
-          is_feiertag: checked,
-        },
-      };
+      if (field === "is_urlaub") return { ...prev, [dayId]: { is_urlaub: checked, is_wetter: checked ? false : current.is_wetter, is_feiertag: checked ? false : current.is_feiertag } };
+      if (field === "is_wetter") return { ...prev, [dayId]: { is_urlaub: checked ? false : current.is_urlaub, is_wetter: checked, is_feiertag: checked ? false : current.is_feiertag } };
+      return { ...prev, [dayId]: { is_urlaub: checked ? false : current.is_urlaub, is_wetter: checked ? false : current.is_wetter, is_feiertag: checked } };
     });
   }
 
@@ -462,41 +540,36 @@ export default function AdminControlPage() {
   }
 
   function setDayOpen(dayId: string, open: boolean) {
-    setOpenDays((prev) => ({
-      ...prev,
-      [dayId]: open,
-    }));
+    setOpenDays((prev) => ({ ...prev, [dayId]: open }));
   }
 
-  function sumWorkedHoursLive(items: ItemRow[]) {
-    const total = items.reduce((sum, it) => {
-      return (
-        sum +
-        (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0) +
-        (toNumOrNull(getEdit(it, "unterhalt_h")) ?? 0) +
-        (toNumOrNull(getEdit(it, "reparatur_h")) ?? 0) +
-        (toNumOrNull(getEdit(it, "motormanuel_h")) ?? 0) +
-        (toNumOrNull(getEdit(it, "umsetzen_h")) ?? 0) +
-        (toNumOrNull(getEdit(it, "sonstiges_h")) ?? 0)
-      );
-    }, 0);
+  function dayKomatsuRows(driverId: string, date: string) {
+    return komatsuRows.filter((k) => {
+      const edit = komatsuEdits[k.id];
+      const kDriver = edit?.driverId || komatsuEffectiveDriverId(k, drivers);
+      return k.date === date && kDriver === driverId;
+    });
+  }
 
-    return round1(total) ?? 0;
+  function matchingWaldzeitHours(day: ControlDay | null, k: KomatsuRow) {
+    if (!day) return null;
+    const edit = komatsuEdits[k.id];
+    const machine = edit?.machine || komatsuEffectiveMachine(k, machines);
+    const obj = edit?.objekt || komatsuEffectiveObject(k);
+
+    const exact = day.items.filter((it) => keyPart(getItemText(it, "maschine")) === keyPart(machine) && keyPart(getItemText(it, "objekt")) === keyPart(obj));
+    const source = exact.length > 0 ? exact : day.items.filter((it) => keyPart(getItemText(it, "maschine")) === keyPart(machine));
+    if (source.length === 0) return null;
+
+    return round1(source.reduce((sum, it) => sum + (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0) + (toNumOrNull(getEdit(it, "motormanuel_h")) ?? 0), 0));
   }
 
   async function createDayAndItem(driver: DriverRow, date: string) {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) {
-      setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
-      return;
-    }
-
-    if (!defaultMachine) {
-      setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
-      return;
-    }
+    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+    if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
 
     setBusy(true);
     setMsg("Tag und Einsatz werden angelegt...");
@@ -504,18 +577,7 @@ export default function AdminControlPage() {
     try {
       const { data: dayData, error: dayErr } = await supabase
         .from("workdays")
-        .insert({
-          user_id: driver.user_id,
-          date,
-          arbeitsbeginn: null,
-          arbeitsende: null,
-          kommentar: null,
-          is_urlaub: false,
-          is_wetter: false,
-          is_feiertag: false,
-          is_controlled: false,
-          controlled_at: null,
-        })
+        .insert({ user_id: driver.user_id, date, arbeitsbeginn: null, arbeitsende: null, kommentar: null, is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null })
         .select("id")
         .single();
 
@@ -542,7 +604,6 @@ export default function AdminControlPage() {
       });
 
       if (itemErr) throw new Error(itemErr.message);
-
       setDayOpen(dayData.id, true);
       setMsg("✅ Tag und Einsatz angelegt.");
       await loadData();
@@ -557,31 +618,14 @@ export default function AdminControlPage() {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) {
-      setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
-      return;
-    }
-
-    if (!defaultMachine) {
-      setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
-      return;
-    }
+    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+    if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
 
     setBusy(true);
     setMsg("Einsatz wird hinzugefügt...");
 
     try {
-      const { error: dayErr } = await supabase
-        .from("workdays")
-        .update({
-          is_urlaub: false,
-          is_wetter: false,
-          is_feiertag: false,
-          is_controlled: false,
-          controlled_at: null,
-        })
-        .eq("id", day.id);
-
+      const { error: dayErr } = await supabase.from("workdays").update({ is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null }).eq("id", day.id);
       if (dayErr) throw new Error(dayErr.message);
 
       const { error: itemErr } = await supabase.from("work_items").insert({
@@ -605,7 +649,6 @@ export default function AdminControlPage() {
       });
 
       if (itemErr) throw new Error(itemErr.message);
-
       setDayOpen(day.id, true);
       setMsg("✅ Einsatz hinzugefügt. Bitte Objekt/Maschine prüfen.");
       await loadData();
@@ -620,23 +663,38 @@ export default function AdminControlPage() {
     const e = edits[item.id] ?? {};
     const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "" };
 
-    const payload: Record<string, any> = {
-      objekt: t.objekt?.trim() || null,
-      maschine: t.maschine?.trim() || null,
-    };
-
+    const payload: Record<string, any> = { objekt: t.objekt?.trim() || null, maschine: t.maschine?.trim() || null };
     for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? toEditValue(item[f]));
 
     const { error } = await supabase.from("work_items").update(payload).eq("id", item.id);
     if (error) throw new Error(error.message);
   }
 
-  async function saveDayInternal(day: ControlDay, markControlled: boolean) {
+  async function saveKomatsu(k: KomatsuRow, checked?: boolean) {
+    const e = komatsuEdits[k.id] ?? { driverId: "", machine: "", objekt: "", hours: "" };
+    const hours = toNumOrNull(e.hours);
+
+    const payload: Record<string, any> = {
+      corrected_driver_id: e.driverId || null,
+      corrected_machine_name: e.machine || null,
+      corrected_object_name: e.objekt || null,
+      motor_runtime_h: hours,
+    };
+
+    if (typeof checked === "boolean") payload.is_checked = checked;
+
+    const { error } = await supabase.from("komatsu_hours").update(payload).eq("id", k.id);
+    if (error) throw new Error(error.message);
+  }
+
+  async function saveDayInternal(day: ControlDay, markControlled: boolean, markKomatsuChecked: boolean) {
     for (const item of day.items) await saveItem(item);
 
     const flags = dayFlags[day.id] ?? defaultFlags(day);
+    const nextDate = dateEdits[day.id] || day.date;
 
     const payload: Record<string, any> = {
+      date: nextDate,
       kommentar: commentEdits[day.id]?.trim() || null,
       is_urlaub: !!flags.is_urlaub,
       is_wetter: !!flags.is_wetter,
@@ -650,6 +708,9 @@ export default function AdminControlPage() {
 
     const { error } = await supabase.from("workdays").update(payload).eq("id", day.id);
     if (error) throw new Error(error.message);
+
+    const kRows = dayKomatsuRows(day.user_id, day.date);
+    for (const k of kRows) await saveKomatsu(k, markKomatsuChecked ? true : undefined);
   }
 
   async function saveDayAndMarkControlled(day: ControlDay) {
@@ -659,7 +720,7 @@ export default function AdminControlPage() {
     setMsg("Speichere Kontrolle...");
 
     try {
-      await saveDayInternal(day, true);
+      await saveDayInternal(day, true, true);
       setDayOpen(day.id, false);
       setMsg("✅ Gespeichert und als kontrolliert markiert.");
       await loadData();
@@ -672,21 +733,17 @@ export default function AdminControlPage() {
 
   async function saveWeekAndMarkControlled(group: DriverWeekGroup, weekKey: string) {
     const existingDays = group.days.map((x) => x.day).filter(Boolean) as ControlDay[];
+    const orphanKomatsu = group.days.flatMap((x) => (!x.day ? x.komatsu : []));
 
-    if (existingDays.length === 0) {
-      setMsg("Keine vorhandenen Tage in dieser Woche zum Speichern.");
-      return;
-    }
-
-    if (!confirm(`${weekKey} für ${group.driverName} speichern und als kontrolliert markieren?\n\nVorhandene Tage: ${existingDays.length}`)) return;
+    if (existingDays.length === 0 && orphanKomatsu.length === 0) return setMsg("Keine vorhandenen Tage oder Komatsu-Zeilen in dieser Woche zum Speichern.");
+    if (!confirm(`${weekKey} für ${group.driverName} speichern und als kontrolliert markieren?`)) return;
 
     setBusy(true);
     setMsg("Speichere Woche...");
 
     try {
-      for (const day of existingDays) {
-        await saveDayInternal(day, true);
-      }
+      for (const day of existingDays) await saveDayInternal(day, true, true);
+      for (const k of orphanKomatsu) await saveKomatsu(k, true);
 
       setOpenDays((prev) => {
         const next = { ...prev };
@@ -709,14 +766,7 @@ export default function AdminControlPage() {
     setBusy(true);
     setMsg("Speichere...");
 
-    const { error } = await supabase
-      .from("workdays")
-      .update({
-        is_controlled: false,
-        controlled_at: null,
-      })
-      .eq("id", day.id);
-
+    const { error } = await supabase.from("workdays").update({ is_controlled: false, controlled_at: null }).eq("id", day.id);
     if (error) {
       setMsg("Fehler: " + error.message);
       setBusy(false);
@@ -728,7 +778,7 @@ export default function AdminControlPage() {
     setBusy(false);
   }
 
-  const grouped = useMemo<WeekGroup[]>((() => {
+  const grouped = useMemo<WeekGroup[]>(() => {
     const allDates = listDatesInRange(from, to);
     const weekDateMap = new Map<string, string[]>();
 
@@ -740,12 +790,9 @@ export default function AdminControlPage() {
     }
 
     const actualByDriverDate = new Map<string, ControlDay>();
-    for (const d of days) {
-      actualByDriverDate.set(`${d.user_id}__${d.date}`, d);
-    }
+    for (const d of days) actualByDriverDate.set(`${d.user_id}__${d.date}`, d);
 
     const relevantDrivers = (selectedDriver ? drivers.filter((d) => d.user_id === selectedDriver) : drivers).filter((d) => d.is_active !== false);
-
     const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? 1 : -1));
     const result: WeekGroup[] = [];
 
@@ -757,34 +804,29 @@ export default function AdminControlPage() {
         const displayDays: DisplayDay[] = weekDates.map((date) => ({
           date,
           day: actualByDriverDate.get(`${driver.user_id}__${date}`) ?? null,
+          komatsu: dayKomatsuRows(driver.user_id, date),
         }));
 
         const hasAnyActualDay = displayDays.some((x) => !!x.day);
         const hasUncheckedDay = displayDays.some((x) => x.day && !x.day.is_controlled);
+        const hasOpenKomatsu = displayDays.some((x) => x.komatsu.some((k) => !k.is_checked));
+        const hasKomatsu = displayDays.some((x) => x.komatsu.length > 0);
 
         if (onlyUnchecked) {
-          if (!hasUncheckedDay) continue;
+          if (!hasUncheckedDay && !hasOpenKomatsu) continue;
         } else {
-          if (!hasAnyActualDay && !selectedDriver) continue;
+          if (!hasAnyActualDay && !hasKomatsu && !selectedDriver) continue;
         }
 
-        driverGroups.push({
-          driver,
-          driverName: driverLabel(driver),
-          days: displayDays,
-        });
+        driverGroups.push({ driver, driverName: driverLabel(driver), days: displayDays });
       }
 
-      if (driverGroups.length > 0) {
-        result.push({
-          key: weekKey,
-          drivers: driverGroups,
-        });
-      }
+      if (driverGroups.length > 0) result.push({ key: weekKey, drivers: driverGroups });
     }
 
     return result;
-  }) as any, [days, drivers, from, to, selectedDriver, onlyUnchecked]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days, drivers, komatsuRows, komatsuEdits, from, to, selectedDriver, onlyUnchecked]);
 
   if (admin === null) {
     return (
@@ -801,9 +843,7 @@ export default function AdminControlPage() {
       <main className="wrap">
         <h1 className="h1">Kontrolle</h1>
         <p className="bad">❌ Du bist kein Admin.</p>
-        <Link href="/app">
-          <button className="btn">Zur Übersicht</button>
-        </Link>
+        <Link href="/app"><button className="btn">Zur Übersicht</button></Link>
         <style jsx>{baseStyles}</style>
       </main>
     );
@@ -814,21 +854,13 @@ export default function AdminControlPage() {
       <header className="head">
         <div>
           <h1 className="h1">Kontrolle</h1>
-          <div className="sub">
-            Angemeldet als: <b>{meName || "…"}</b>
-          </div>
+          <div className="sub">Angemeldet als: <b>{meName || "…"}</b></div>
         </div>
 
         <div className="topActions">
-          <Link href="/admin">
-            <button className="btn">Admin</button>
-          </Link>
-          <Link href="/admin/export">
-            <button className="btn">Export</button>
-          </Link>
-          <Link href="/app">
-            <button className="btn">Übersicht</button>
-          </Link>
+          <Link href="/admin"><button className="btn">Admin</button></Link>
+          <Link href="/admin/export"><button className="btn">Export</button></Link>
+          <Link href="/app"><button className="btn">Übersicht</button></Link>
         </div>
       </header>
 
@@ -836,36 +868,16 @@ export default function AdminControlPage() {
         <h2 className="h2">Filter</h2>
 
         <div className="filterGrid">
-          <label className="field">
-            Von
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="control" />
-          </label>
-
-          <label className="field">
-            Bis
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="control" />
-          </label>
-
-          <label className="field">
-            Fahrer
+          <label className="field">Von<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="control" /></label>
+          <label className="field">Bis<input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="control" /></label>
+          <label className="field">Fahrer
             <select value={selectedDriver} onChange={(e) => setSelectedDriver(e.target.value)} className="control">
               <option value="">Alle Fahrer</option>
-              {drivers.map((d) => (
-                <option key={d.user_id} value={d.user_id}>
-                  {driverLabel(d)}
-                </option>
-              ))}
+              {drivers.map((d) => <option key={d.user_id} value={d.user_id}>{driverLabel(d)}</option>)}
             </select>
           </label>
-
-          <label className="checkBox">
-            <input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />
-            Nur offen
-          </label>
-
-          <button onClick={loadData} disabled={busy} className="btnPrimary">
-            {busy ? "Lade..." : "Aktualisieren"}
-          </button>
+          <label className="checkBox"><input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />Nur offen</label>
+          <button onClick={loadData} disabled={busy} className="btnPrimary">{busy ? "Lade..." : "Aktualisieren"}</button>
         </div>
 
         {msg && <pre className="msg">{msg}</pre>}
@@ -874,31 +886,23 @@ export default function AdminControlPage() {
       <div className="weeks">
         {grouped.map((w, idx) => (
           <details key={w.key} className="weekCard" open={idx === 0}>
-            <summary className="weekSummary">
-              <span className="plus">＋</span>
-              <span>{w.key}</span>
-            </summary>
+            <summary className="weekSummary"><span className="plus">＋</span><span>{w.key}</span></summary>
 
             <div className="drivers">
               {w.drivers.map((driverGroup) => {
                 const existingDays = driverGroup.days.filter((x) => !!x.day).length;
                 const uncheckedDays = driverGroup.days.filter((x) => x.day && !x.day.is_controlled).length;
+                const kOpen = driverGroup.days.reduce((sum, x) => sum + x.komatsu.filter((k) => !k.is_checked).length, 0);
 
                 return (
                   <details key={`${w.key}-${driverGroup.driver.user_id}`} className="driverCard" open>
                     <summary className="driverSummary">
                       <span className="plus">＋</span>
                       <span>{driverGroup.driverName}</span>
-                      <span className="driverMeta">
-                        {existingDays} Einträge · {uncheckedDays} offen
-                      </span>
+                      <span className="driverMeta">{existingDays} Tage · {uncheckedDays} Waldzeit offen · {kOpen} Komatsu offen</span>
                     </summary>
 
-                    <div className="weekActions">
-                      <button type="button" onClick={() => saveWeekAndMarkControlled(driverGroup, w.key)} disabled={busy} className="btnPrimary">
-                        Woche kontrolliert
-                      </button>
-                    </div>
+                    <div className="weekActions"><button type="button" onClick={() => saveWeekAndMarkControlled(driverGroup, w.key)} disabled={busy} className="btnPrimary">Woche kontrolliert</button></div>
 
                     <div className="days">
                       {driverGroup.days.map((display) => {
@@ -906,142 +910,79 @@ export default function AdminControlPage() {
 
                         if (!d) {
                           return (
-                            <div key={display.date} className="missingDay">
+                            <div key={display.date} className={display.komatsu.length > 0 ? "missingDay hasKomatsu" : "missingDay"}>
                               <div>
-                                <b>
-                                  {weekdayDE(display.date)} {fmtDE(display.date)}
-                                </b>
-                                <div style={{ opacity: 0.7, fontSize: 12 }}>Kein Eintrag</div>
+                                <b>{weekdayDE(display.date)} {fmtDE(display.date)}</b>
+                                <div className="small">Kein Waldzeit-Eintrag {display.komatsu.length > 0 ? `· ${display.komatsu.length} Komatsu-Zeile(n)` : ""}</div>
+                                {display.komatsu.length > 0 && <KomatsuCompactList rows={display.komatsu} edits={komatsuEdits} drivers={drivers} machines={machines} objects={objects} updateKomatsuEdit={updateKomatsuEdit} saveKomatsu={saveKomatsu} busy={busy} />}
                               </div>
 
-                              <button type="button" onClick={() => createDayAndItem(driverGroup.driver, display.date)} disabled={busy} className="btn">
-                                + Eintrag
-                              </button>
+                              <button type="button" onClick={() => createDayAndItem(driverGroup.driver, display.date)} disabled={busy} className="btn">+ Eintrag</button>
                             </div>
                           );
                         }
 
                         const arbeitszeit = timeDiffHours(d.arbeitsbeginn, d.arbeitsende);
-                        const geleistet = sumWorkedHoursLive(d.items);
-                        const diff = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
+                        const geleistet = sumWorkedHoursLive(d.items, edits);
+                        const kTotal = round1(display.komatsu.reduce((sum, k) => sum + (toNumOrNull(komatsuEdits[k.id]?.hours ?? toEditValue(komatsuHours(k))) ?? 0), 0));
+                        const diffKomatsu = kTotal === null ? null : round1(geleistet - kTotal);
+                        const diffArbeitszeit = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? defaultFlags(d);
                         const isOpen = openDays[d.id] ?? false;
 
                         return (
-                          <details
-                            key={d.id}
-                            className={d.is_controlled ? "dayCard controlled" : "dayCard"}
-                            open={isOpen}
-                            onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}
-                          >
+                          <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"} open={isOpen} onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}>
                             <summary className="daySummary">
                               <div className="dayMain">
-                                <b>
-                                  {weekdayDE(d.date)} {fmtDE(d.date)}
-                                </b>
-                                <span className="miniStats">
-                                  AZ {format1(arbeitszeit)}h · Leist. {format1(geleistet)}h · Diff {format1(diff)}h
-                                </span>
+                                <b>{weekdayDE(d.date)} {fmtDE(d.date)}</b>
+                                <span className="miniStats">AZ {format1(arbeitszeit)}h · Wald {format1(geleistet)}h · Komatsu {format1(kTotal)}h · Diff K {format1(diffKomatsu)}h</span>
                               </div>
 
                               <div className="badges">
                                 {flags.is_urlaub && <span className="badge green">Urlaub</span>}
                                 {flags.is_wetter && <span className="badge blue">Wetter</span>}
                                 {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
+                                {display.komatsu.length > 0 && <span className="badge komatsu">K {display.komatsu.length}</span>}
                                 {d.is_controlled && <span className="badge done">OK</span>}
                               </div>
                             </summary>
 
                             <div className="compareBox">
-                              <div>
-                                <b>Arbeitszeit</b>
-                                <br />
-                                {format1(arbeitszeit)} h{" "}
-                                <span className="small">
-                                  {d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}
-                                </span>
-                              </div>
-                              <div>
-                                <b>Geleistet</b>
-                                <br />
-                                {format1(geleistet)} h <span className="small">ohne Fahrt</span>
-                              </div>
-                              <div className={diff !== null && Math.abs(diff) > 0.25 ? "diffWarn" : "diffOk"}>
-                                <b>Differenz</b>
-                                <br />
-                                {format1(diff)} h
-                              </div>
+                              <div><b>Datum</b><br /><input type="date" value={dateEdits[d.id] ?? d.date} onChange={(e) => setDateEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} /></div>
+                              <div><b>Arbeitszeit</b><br />{format1(arbeitszeit)} h <span className="small">{d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}</span></div>
+                              <div><b>Waldzeit</b><br />{format1(geleistet)} h <span className="small">ohne Fahrt</span></div>
+                              <div className={diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25 ? "diffWarn" : "diffOk"}><b>Diff AZ</b><br />{format1(diffArbeitszeit)} h</div>
+                              <div><b>Komatsu</b><br />{format1(kTotal)} h</div>
+                              <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><br />{format1(diffKomatsu)} h</div>
                             </div>
 
                             <div className="flagsRow">
-                              <label className="flagBox">
-                                <input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />
-                                Urlaub
-                              </label>
-
-                              <label className="flagBox">
-                                <input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />
-                                Wetter
-                              </label>
-
-                              <label className="flagBox">
-                                <input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />
-                                Feiertag
-                              </label>
-
-                              <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">
-                                + Einsatz hinzufügen
-                              </button>
+                              <label className="flagBox"><input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />Urlaub</label>
+                              <label className="flagBox"><input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />Wetter</label>
+                              <label className="flagBox"><input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />Feiertag</label>
+                              <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">+ Einsatz hinzufügen</button>
                             </div>
 
-                            <label className="commentEdit">
-                              Tageskommentar
-                              <textarea
-                                value={commentEdits[d.id] ?? ""}
-                                onChange={(e) =>
-                                  setCommentEdits((prev) => ({
-                                    ...prev,
-                                    [d.id]: e.target.value,
-                                  }))
-                                }
-                                placeholder="Tageskommentar..."
-                              />
+                            <label className="commentEdit">Tageskommentar
+                              <textarea value={commentEdits[d.id] ?? ""} onChange={(e) => setCommentEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} placeholder="Tageskommentar..." />
                             </label>
 
-                            {d.items.length === 0 ? (
-                              <div className="empty">Keine Einsätze</div>
-                            ) : (
+                            {display.komatsu.length > 0 && (
+                              <section className="komatsuBox">
+                                <h3>Komatsu-Abgleich</h3>
+                                <KomatsuCompactList rows={display.komatsu} edits={komatsuEdits} drivers={drivers} machines={machines} objects={objects} updateKomatsuEdit={updateKomatsuEdit} saveKomatsu={saveKomatsu} busy={busy} day={d} matchingWaldzeitHours={matchingWaldzeitHours} />
+                              </section>
+                            )}
+
+                            {d.items.length === 0 ? <div className="empty">Keine Waldzeit-Einsätze</div> : (
                               <div className="items">
                                 {d.items.map((it, itemIdx) => (
                                   <div key={it.id} className="itemRow">
-                                    <div className="itemHead">
-                                      <b>Einsatz {itemIdx + 1}</b>
-                                    </div>
+                                    <div className="itemHead"><b>Waldzeit Einsatz {itemIdx + 1}</b><span>{format1(workItemHours(it))} h gespeichert</span></div>
 
                                     <div className="selectGrid">
-                                      <label className="selectField">
-                                        Objekt
-                                        <select value={getItemText(it, "objekt")} onChange={(e) => updateItemText(it.id, "objekt", e.target.value)}>
-                                          <option value="">Ohne Objekt</option>
-                                          {objects.map((o) => (
-                                            <option key={o.id} value={o.name}>
-                                              {o.name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </label>
-
-                                      <label className="selectField">
-                                        Maschine
-                                        <select value={getItemText(it, "maschine")} onChange={(e) => updateItemText(it.id, "maschine", e.target.value)}>
-                                          <option value="">Ohne Maschine</option>
-                                          {machines.map((m) => (
-                                            <option key={m.id} value={m.name}>
-                                              {m.name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </label>
+                                      <label className="selectField">Objekt<select value={getItemText(it, "objekt")} onChange={(e) => updateItemText(it.id, "objekt", e.target.value)}><option value="">Ohne Objekt</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
+                                      <label className="selectField">Maschine<select value={getItemText(it, "maschine")} onChange={(e) => updateItemText(it.id, "maschine", e.target.value)}><option value="">Ohne Maschine</option>{machines.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}</select></label>
                                     </div>
 
                                     <div className="editGrid">
@@ -1064,15 +1005,8 @@ export default function AdminControlPage() {
                             )}
 
                             <div className="dayActions">
-                              <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">
-                                Speichern + kontrolliert
-                              </button>
-
-                              {d.is_controlled && (
-                                <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">
-                                  Wieder öffnen
-                                </button>
-                              )}
+                              <button type="button" onClick={() => saveDayAndMarkControlled(d)} disabled={busy} className="btnPrimary">Speichern + kontrolliert</button>
+                              {d.is_controlled && <button type="button" onClick={() => markUnchecked(d)} disabled={busy} className="btn">Wieder öffnen</button>}
                             </div>
                           </details>
                         );
@@ -1094,100 +1028,59 @@ export default function AdminControlPage() {
 }
 
 function NumberInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return <label className="numField">{label}<input value={value} onChange={(e) => onChange(e.target.value)} inputMode="decimal" /></label>;
+}
+
+function KomatsuCompactList({ rows, edits, drivers, machines, objects, updateKomatsuEdit, saveKomatsu, busy, day, matchingWaldzeitHours }: {
+  rows: KomatsuRow[];
+  edits: Record<string, { driverId: string; machine: string; objekt: string; hours: string }>;
+  drivers: DriverRow[];
+  machines: OptionRow[];
+  objects: OptionRow[];
+  updateKomatsuEdit: (id: string, field: "driverId" | "machine" | "objekt" | "hours", value: string) => void;
+  saveKomatsu: (k: KomatsuRow, checked?: boolean) => Promise<void>;
+  busy: boolean;
+  day?: ControlDay;
+  matchingWaldzeitHours?: (day: ControlDay | null, k: KomatsuRow) => number | null;
+}) {
   return (
-    <label className="numField">
-      {label}
-      <input value={value} onChange={(e) => onChange(e.target.value)} inputMode="decimal" />
-    </label>
+    <div className="kRows">
+      {rows.map((k) => {
+        const e = edits[k.id] ?? { driverId: "", machine: "", objekt: "", hours: "" };
+        const wald = matchingWaldzeitHours && day ? matchingWaldzeitHours(day, k) : null;
+        const diff = wald === null ? null : round1(wald - (toNumOrNull(e.hours) ?? 0));
+        return (
+          <div key={k.id} className="kRow">
+            <div className="kTop"><b>{format1(toNumOrNull(e.hours))} h</b><span>Objekt Komatsu: {k.object_name || "-"}</span>{diff !== null && <span className={Math.abs(diff) > 0.5 ? "diffWarn" : "diffOk"}>Diff {format1(diff)}h</span>}</div>
+            <div className="kGrid">
+              <label>Fahrer<select value={e.driverId} onChange={(ev) => updateKomatsuEdit(k.id, "driverId", ev.target.value)}><option value="">?</option>{drivers.map((d) => <option key={d.user_id} value={d.user_id}>{driverLabel(d)}</option>)}</select></label>
+              <label>Maschine<select value={e.machine} onChange={(ev) => updateKomatsuEdit(k.id, "machine", ev.target.value)}><option value="">?</option>{machines.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}</select></label>
+              <label>Objekt<select value={e.objekt} onChange={(ev) => updateKomatsuEdit(k.id, "objekt", ev.target.value)}><option value="">?</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
+              <label>h<input value={e.hours} inputMode="decimal" onChange={(ev) => updateKomatsuEdit(k.id, "hours", ev.target.value)} /></label>
+            </div>
+            <div className="kActions"><button type="button" className="btn" disabled={busy} onClick={() => saveKomatsu(k)}>Komatsu speichern</button><button type="button" className="btnPrimary" disabled={busy} onClick={() => saveKomatsu(k, true)}>Komatsu OK</button></div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
 const baseStyles = `
-.wrap{max-width:1080px;margin:18px auto;padding:8px}
+.wrap{max-width:1220px;margin:14px auto;padding:8px}
 .head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
-.h1{margin:0;font-size:32px;line-height:1.1}
-.h2{margin:0 0 8px 0;font-size:20px}
-.sub{opacity:.82;margin-top:4px}
-.topActions{display:flex;gap:8px;flex-wrap:wrap}
-.btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:800;cursor:pointer}
-.btn{padding:8px 10px;border-radius:10px}
-.btnPrimary{padding:10px 12px;border-radius:10px;font-weight:900}
-.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:14px;padding:10px;background:#fff}
-.card{margin-top:10px}
-.compactCard{padding:10px}
-.filterGrid{display:grid;grid-template-columns:1fr 1fr 1.3fr auto auto;gap:8px;align-items:end}
-.field{display:block;font-size:13px;font-weight:800}
-.control{width:100%;padding:9px;font-size:15px;margin-top:4px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
-.checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}
-.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}
-.bad{color:crimson;font-weight:800}
-.weeks{display:grid;gap:10px;margin-top:10px}
-.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}
-.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}
-.plus{display:inline-block;transition:transform .12s ease;font-size:19px}
-details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
-.drivers,.days{display:grid;gap:8px;margin-top:8px}
-.driverCard{background:#fcfcfc;padding:9px}
-.driverMeta{margin-left:auto;font-size:12px;opacity:.7}
-.weekActions{margin-top:8px;display:flex;justify-content:flex-end}
-.dayCard{padding:8px}
-.dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
-.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.78;font-size:14px}
-.daySummary{justify-content:space-between}
-.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.miniStats{font-size:12px;opacity:.7;font-weight:800}
-.badges{display:flex;gap:5px;flex-wrap:wrap}
-.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}
-.badge.green{background:#ecfdf3;border:1px solid #c7f2d5}
-.badge.blue{background:#eef6ff;border:1px solid #cfe4ff}
-.badge.holiday{background:#fff4cc;border:1px solid #f1d37a}
-.badge.done{background:#e2f0d9;border:1px solid #b6d7a8}
-.compareBox{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}
-.diffWarn{color:crimson;font-weight:900}
-.diffOk{color:green;font-weight:900}
-.small{font-size:11px;opacity:.72}
-.flagsRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-.flagBox{display:flex;gap:6px;align-items:center;border:1px solid #eee;border-radius:10px;padding:7px 10px;background:#fff;font-weight:900;font-size:13px}
-.commentEdit{display:block;margin-top:8px;font-weight:800;font-size:13px}
-.commentEdit textarea{width:100%;min-height:54px;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:10px;font-size:14px;box-sizing:border-box}
-.items{display:grid;gap:7px;margin-top:8px}
-.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}
-.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}
-.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}
-.selectField{font-size:11px;font-weight:900}
-.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}
-.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}
-.numField{font-size:11px;font-weight:800;opacity:.95}
-.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}
-.empty{margin-top:8px;opacity:.65;font-size:13px}
-.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-@media(max-width:800px){
-  .wrap{margin:10px auto;padding:6px}
-  .h1{font-size:26px}
-  .head{flex-direction:column;align-items:stretch}
-  .topActions{gap:6px}
-  .topActions .btn{flex:1}
-  .filterGrid{grid-template-columns:1fr 1fr}
-  .filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}
-  .weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}
-  .driverSummary{flex-wrap:wrap}
-  .driverMeta{width:100%;margin-left:28px}
-  .weekActions .btnPrimary{width:100%}
-  .daySummary{align-items:flex-start;gap:6px}
-  .dayMain{display:grid;gap:2px}
-  .miniStats{font-size:11px}
-  .badges{justify-content:flex-start}
-  .compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}
-  .selectGrid{grid-template-columns:1fr}
-  .editGrid{grid-template-columns:repeat(3,1fr)}
-  .dayActions .btn,.dayActions .btnPrimary{width:100%}
-  .missingDay{font-size:13px;padding:7px}
-}
-@media(max-width:430px){
-  .filterGrid{grid-template-columns:1fr}
-  .compareBox{grid-template-columns:1fr}
-  .editGrid{grid-template-columns:repeat(2,1fr)}
-  .btn,.btnPrimary{padding:9px 10px}
-  .weekSummary,.driverSummary{font-size:15px}
-}
+.h1{margin:0;font-size:32px;line-height:1.1}.h2{margin:0 0 8px 0;font-size:20px}.sub{opacity:.82;margin-top:4px}.topActions{display:flex;gap:8px;flex-wrap:wrap}
+.btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:800;cursor:pointer}.btn{padding:8px 10px;border-radius:10px}.btnPrimary{padding:10px 12px;border-radius:10px;font-weight:900;background:#fafafa}
+.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:14px;padding:10px;background:#fff}.card{margin-top:10px}.compactCard{padding:10px}
+.filterGrid{display:grid;grid-template-columns:1fr 1fr 1.3fr auto auto;gap:8px;align-items:end}.field{display:block;font-size:13px;font-weight:800}.control{width:100%;padding:9px;font-size:15px;margin-top:4px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
+.checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}.bad{color:crimson;font-weight:800}
+.weeks{display:grid;gap:10px;margin-top:10px}.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}.plus{display:inline-block;transition:transform .12s ease;font-size:19px}details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
+.drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:8px}.dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
+.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#ecfdf3;border:1px solid #c7f2d5}.badge.blue{background:#eef6ff;border:1px solid #cfe4ff}.badge.holiday{background:#fff4cc;border:1px solid #f1d37a}.badge.done{background:#e2f0d9;border:1px solid #b6d7a8}.badge.komatsu{background:#f7f7f7;border:1px solid #ddd}
+.compareBox{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}.compareBox input{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px}.diffWarn{color:crimson;font-weight:900}.diffOk{color:green;font-weight:900}.small{font-size:11px;opacity:.72}
+.flagsRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.flagBox{display:flex;gap:6px;align-items:center;border:1px solid #eee;border-radius:10px;padding:7px 10px;background:#fff;font-weight:900;font-size:13px}.commentEdit{display:block;margin-top:8px;font-weight:800;font-size:13px}.commentEdit textarea{width:100%;min-height:48px;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:10px;font-size:14px;box-sizing:border-box}
+.komatsuBox{border:1px solid #eee;border-radius:12px;margin-top:8px;padding:8px;background:#fff}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.1fr 1fr 1.3fr .5fr;gap:6px;margin-top:6px}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.kActions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary{width:100%}.missingDay{font-size:13px;padding:7px}}
+@media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.kActions .btn,.kActions .btnPrimary{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
 `;
