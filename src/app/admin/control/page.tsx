@@ -503,7 +503,7 @@ export default function AdminControlPage() {
 
     const rawKomatsu = (((kRes.data as any[]) ?? []) as KomatsuRow[]).filter((k) => {
       const h = komatsuHours(k);
-      if (h === null || h < 1) return false;
+      if (h === null || h <= 1) return false;
       if (onlyUnchecked && k.is_checked) return false;
       return true;
     });
