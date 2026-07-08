@@ -592,49 +592,80 @@ export default function AdminControlPage() {
     return round1(source.reduce((sum, it) => sum + (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0), 0));
   }
 
-  async function createDayAndItem(driver: DriverRow, date: string) {
+  async function createDay(driver: DriverRow, date: string, kind: "work" | "urlaub" | "wetter" | "feiertag") {
+    const isWork = kind === "work";
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
-    if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
+    if (isWork && !defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+    if (isWork && !defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
 
     setBusy(true);
-    setMsg("Tag und Einsatz werden angelegt...");
+    setMsg(
+      kind === "work"
+        ? "Tag und Einsatz werden angelegt..."
+        : kind === "urlaub"
+          ? "Urlaubstag wird angelegt..."
+          : kind === "wetter"
+            ? "Wettertag wird angelegt..."
+            : "Feiertag wird angelegt..."
+    );
 
     try {
       const { data: dayData, error: dayErr } = await supabase
         .from("workdays")
-        .insert({ user_id: driver.user_id, date, arbeitsbeginn: null, arbeitsende: null, kommentar: null, is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null })
+        .insert({
+          user_id: driver.user_id,
+          date,
+          arbeitsbeginn: null,
+          arbeitsende: null,
+          kommentar: null,
+          is_urlaub: kind === "urlaub",
+          is_wetter: kind === "wetter",
+          is_feiertag: kind === "feiertag",
+          is_controlled: false,
+          controlled_at: null,
+        })
         .select("id")
         .single();
 
       if (dayErr) throw new Error(dayErr.message);
 
-      const { error: itemErr } = await supabase.from("work_items").insert({
-        workday_id: dayData.id,
-        objekt: defaultObject,
-        maschine: defaultMachine,
-        fahrtzeit_min: null,
-        mas_start: null,
-        mas_end: null,
-        maschinenstunden_h: null,
-        unterhalt_h: null,
-        reparatur_h: null,
-        motormanuel_h: null,
-        umsetzen_h: null,
-        sonstiges_h: null,
-        sonstiges_beschreibung: null,
-        diesel_l: null,
-        adblue_l: null,
-        kommentar: null,
-        twinch_used: false,
-        twinch_h: null,
-      });
+      if (isWork) {
+        const { error: itemErr } = await supabase.from("work_items").insert({
+          workday_id: dayData.id,
+          objekt: defaultObject,
+          maschine: defaultMachine,
+          fahrtzeit_min: null,
+          mas_start: null,
+          mas_end: null,
+          maschinenstunden_h: null,
+          unterhalt_h: null,
+          reparatur_h: null,
+          motormanuel_h: null,
+          umsetzen_h: null,
+          sonstiges_h: null,
+          sonstiges_beschreibung: null,
+          diesel_l: null,
+          adblue_l: null,
+          kommentar: null,
+          twinch_used: false,
+          twinch_h: null,
+        });
 
-      if (itemErr) throw new Error(itemErr.message);
+        if (itemErr) throw new Error(itemErr.message);
+      }
+
       setDayOpen(dayData.id, true);
-      setMsg("✅ Tag und Einsatz angelegt.");
+      setMsg(
+        kind === "work"
+          ? "✅ Tag und Einsatz angelegt."
+          : kind === "urlaub"
+            ? "✅ Urlaubstag angelegt."
+            : kind === "wetter"
+              ? "✅ Wettertag angelegt."
+              : "✅ Feiertag angelegt."
+      );
       await loadData();
     } catch (e: any) {
       setMsg("Fehler: " + (e?.message || String(e)));
@@ -1006,7 +1037,12 @@ export default function AdminControlPage() {
                                 {display.komatsu.length > 0 && <KomatsuCompactList rows={display.komatsu} edits={komatsuEdits} drivers={drivers} machines={machines} objects={objects} updateKomatsuEdit={updateKomatsuEdit} saveKomatsu={saveKomatsu} busy={busy} />}
                               </div>
 
-                              <button type="button" onClick={() => createDayAndItem(driverGroup.driver, display.date)} disabled={busy} className="btn">+ Eintrag</button>
+                              <div className="missingActions">
+                                <button type="button" onClick={() => createDay(driverGroup.driver, display.date, "work")} disabled={busy} className="btn">+ Einsatz</button>
+                                <button type="button" onClick={() => createDay(driverGroup.driver, display.date, "wetter")} disabled={busy} className="btnStatus weatherBtn">Wetter</button>
+                                <button type="button" onClick={() => createDay(driverGroup.driver, display.date, "urlaub")} disabled={busy} className="btnStatus holidayBtn">Urlaub</button>
+                                <button type="button" onClick={() => createDay(driverGroup.driver, display.date, "feiertag")} disabled={busy} className="btnStatus feastBtn">Feiertag</button>
+                              </div>
                             </div>
                           );
                         }
@@ -1086,7 +1122,11 @@ export default function AdminControlPage() {
                               <div className="items">
                                 {d.items.map((it, itemIdx) => (
                                   <div key={it.id} className="itemRow">
-                                    <div className="itemHead"><b>Waldzeit Einsatz {itemIdx + 1}</b><span>{format1(workItemHours(it))} h gespeichert</span></div>
+                                    <div className="itemHead">
+                                      <b>Waldzeit Einsatz {itemIdx + 1}</b>
+                                      <span>{format1(workItemHours(it))} h gespeichert</span>
+                                      <button type="button" className="dangerBtn compactDangerBtn" disabled={busy} onClick={() => deleteWorkItem(d, it)}>🗑 Einsatz löschen</button>
+                                    </div>
 
                                     <div className="selectGrid">
                                       <label className="selectField">Objekt<select value={getItemText(it, "objekt")} onChange={(e) => updateItemText(it.id, "objekt", e.target.value)}><option value="">Ohne Objekt</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
@@ -1116,9 +1156,7 @@ export default function AdminControlPage() {
                                       />
                                     </label>
 
-                                    <div className="itemActions">
-                                      <button type="button" className="dangerBtn" disabled={busy} onClick={() => deleteWorkItem(d, it)}>🗑 Einsatz löschen</button>
-                                    </div>
+
                                   </div>
                                 ))}
                               </div>
@@ -1177,8 +1215,8 @@ function KomatsuCompactList({ rows, edits, drivers, machines, objects, updateKom
               <label>Maschine<select value={e.machine} onChange={(ev) => updateKomatsuEdit(k.id, "machine", ev.target.value)}><option value="">?</option>{machines.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}</select></label>
               <label>Objekt<select value={e.objekt} onChange={(ev) => updateKomatsuEdit(k.id, "objekt", ev.target.value)}><option value="">?</option>{objects.map((o) => <option key={o.id} value={o.name}>{o.name}</option>)}</select></label>
               <label>h<input value={e.hours} inputMode="decimal" onChange={(ev) => updateKomatsuEdit(k.id, "hours", ev.target.value)} /></label>
+              <button type="button" className="btnPrimary komatsuDoneBtn" disabled={busy} onClick={() => saveKomatsu(k, true)}>Kontrolle abgeschlossen</button>
             </div>
-            <div className="kActions"><button type="button" className="btnPrimary" disabled={busy} onClick={() => saveKomatsu(k, true)}>Kontrolle abgeschlossen</button></div>
           </div>
         );
       })}
@@ -1196,11 +1234,11 @@ const baseStyles = `
 .checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}.bad{color:crimson;font-weight:800}
 .weeks{display:grid;gap:10px;margin-top:10px}.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}.plus{display:inline-block;transition:transform .12s ease;font-size:19px}details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
 .drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:7px}.dayCard.okDay{background:#e6f7e9;border-color:#54c26e}.dayCard.warnDay{background:#fff1b8;border-color:#e0a800}.dayCard.badDay{background:#ffe1e1;border-color:#e05a5a}.dayCard.controlled{background:#dff4e5;border-color:#3fb95f}
-.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
+.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingActions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:flex-start}.btnStatus{border:1px solid #ddd;background:#fff;font-weight:900;cursor:pointer;padding:8px 10px;border-radius:10px}.weatherBtn{background:#cbe4ff;border-color:#559cdf}.holidayBtn{background:#b9efc7;border-color:#38b65a}.feastBtn{background:#ffe082;border-color:#e0a800}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
 .dayControlPanel{display:grid;gap:6px;margin-top:6px}.compareBox{display:grid;grid-template-columns:.95fr repeat(6,.8fr);gap:5px;border:1px solid #ddd;border-radius:10px;padding:6px;background:rgba(255,255,255,.78);font-size:12px}.compareBox>div,.compareBox>.dateField{display:grid;gap:1px;align-content:start;min-width:0}.compareBox b{font-size:11px}.compareBox span{font-size:13px;font-weight:900}.compareBox small{font-size:10px;opacity:.68}.compareBox input{width:100%;padding:6px;border:1px solid #ccc;border-radius:8px;font-size:12px}.diffWarn{color:#d0003b;font-weight:900}.diffOk{color:#087c24;font-weight:900}.small{font-size:11px;opacity:.72}
 .flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
-.komatsuBox{border:1px solid #ddd;border-radius:10px;margin-top:6px;padding:7px;background:rgba(255,255,255,.9)}.warnKomatsuBox{border-color:#e0a800;background:#fff1b8}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.1fr 1fr 1.3fr .5fr;gap:6px;margin-top:6px}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.kActions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
-.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingDay{font-size:13px;padding:7px}}
-@media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr 1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.kActions .btn,.kActions .btnPrimary{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
+.komatsuBox{border:1px solid #ddd;border-radius:10px;margin-top:6px;padding:7px;background:rgba(255,255,255,.9)}.warnKomatsuBox{border-color:#e0a800;background:#fff1b8}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.05fr .95fr 1.25fr .45fr auto;gap:6px;margin-top:6px;align-items:end}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.komatsuDoneBtn{height:34px;white-space:nowrap;padding:7px 10px}
+.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px;flex-wrap:wrap}.compactDangerBtn{padding:5px 8px;font-size:12px;margin-left:auto}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingActions{width:100%;justify-content:flex-start}.missingActions .btn,.missingActions .btnStatus{flex:1 1 auto}.missingDay{font-size:13px;padding:7px}}
+@media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr 1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.komatsuDoneBtn{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
 `;
