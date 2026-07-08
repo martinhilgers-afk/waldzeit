@@ -359,7 +359,7 @@ export default function AdminControlPage() {
   const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
 
   const [edits, setEdits] = useState<Record<string, Partial<Record<NumField, string>>>>({});
-  const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string; sonstiges_beschreibung: string }>>({});
+  const [itemTextEdits, setItemTextEdits] = useState<Record<string, { objekt: string; maschine: string; sonstiges_beschreibung: string; kommentar: string }>>({});
   const [commentEdits, setCommentEdits] = useState<Record<string, string>>({});
   const [dateEdits, setDateEdits] = useState<Record<string, string>>({});
   const [dayFlags, setDayFlags] = useState<Record<string, DayFlags>>({});
@@ -477,7 +477,7 @@ export default function AdminControlPage() {
     }));
 
     const nextEdits: Record<string, Partial<Record<NumField, string>>> = {};
-    const nextTextEdits: Record<string, { objekt: string; maschine: string; sonstiges_beschreibung: string }> = {};
+    const nextTextEdits: Record<string, { objekt: string; maschine: string; sonstiges_beschreibung: string; kommentar: string }> = {};
 
     for (const item of itemRows) {
       nextEdits[item.id] = {};
@@ -487,6 +487,7 @@ export default function AdminControlPage() {
         objekt: item.objekt ?? "",
         maschine: item.maschine ?? "",
         sonstiges_beschreibung: item.sonstiges_beschreibung ?? "",
+        kommentar: item.kommentar ?? "",
       };
     }
 
@@ -539,11 +540,11 @@ export default function AdminControlPage() {
     }));
   }
 
-  function updateItemText(itemId: string, field: "objekt" | "maschine" | "sonstiges_beschreibung", value: string) {
+  function updateItemText(itemId: string, field: "objekt" | "maschine" | "sonstiges_beschreibung" | "kommentar", value: string) {
     setItemTextEdits((prev) => ({
       ...prev,
       [itemId]: {
-        ...(prev[itemId] ?? { objekt: "", maschine: "", sonstiges_beschreibung: "" }),
+        ...(prev[itemId] ?? { objekt: "", maschine: "", sonstiges_beschreibung: "", kommentar: "" }),
         [field]: value,
       },
     }));
@@ -573,7 +574,7 @@ export default function AdminControlPage() {
     return edits[item.id]?.[field] ?? toEditValue(item[field]);
   }
 
-  function getItemText(item: ItemRow, field: "objekt" | "maschine" | "sonstiges_beschreibung") {
+  function getItemText(item: ItemRow, field: "objekt" | "maschine" | "sonstiges_beschreibung" | "kommentar") {
     return itemTextEdits[item.id]?.[field] ?? item[field] ?? "";
   }
 
@@ -673,6 +674,16 @@ export default function AdminControlPage() {
     return issues;
   }
 
+
+  function hasArbeitszeitIssue(diffArbeitszeit: number | null) {
+    if (diffArbeitszeit === null) return false;
+
+    // Gelb erst, wenn Waldzeit größer als Arbeitszeit ist
+    // oder wenn Waldzeit mehr als 1,0 h unter der Arbeitszeit liegt.
+    // Bis 1,0 h weniger wird als Pause toleriert.
+    return diffArbeitszeit > 0 || diffArbeitszeit < -1;
+  }
+
   function getDayIssues(day: ControlDay, diffKomatsu: number | null, diffArbeitszeit: number | null) {
     const issues: DayIssue[] = [];
 
@@ -687,11 +698,14 @@ export default function AdminControlPage() {
     const fahrtIssues = getFahrtIssues(day);
     issues.push(...fahrtIssues);
 
-    if (diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25) {
+    if (hasArbeitszeitIssue(diffArbeitszeit)) {
       issues.push({
         level: "warn",
         label: "Diff AZ",
-        detail: `Arbeitszeit-Differenz ${format1(diffArbeitszeit)} h > 0,25 h`,
+        detail:
+          diffArbeitszeit !== null && diffArbeitszeit > 0
+            ? `Waldzeit überschreitet Arbeitszeit um ${format1(diffArbeitszeit)} h`
+            : `Waldzeit liegt mehr als 1,0 h unter Arbeitszeit: ${format1(diffArbeitszeit)} h`,
       });
     }
 
@@ -828,12 +842,13 @@ export default function AdminControlPage() {
 
   async function saveItem(item: ItemRow) {
     const e = edits[item.id] ?? {};
-    const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "", sonstiges_beschreibung: item.sonstiges_beschreibung ?? "" };
+    const t = itemTextEdits[item.id] ?? { objekt: item.objekt ?? "", maschine: item.maschine ?? "", sonstiges_beschreibung: item.sonstiges_beschreibung ?? "", kommentar: item.kommentar ?? "" };
 
     const payload: Record<string, any> = {
       objekt: t.objekt?.trim() || null,
       maschine: t.maschine?.trim() || null,
       sonstiges_beschreibung: t.sonstiges_beschreibung?.trim() || null,
+      kommentar: t.kommentar?.trim() || null,
     };
     for (const f of NUM_FIELDS) payload[f] = toNumOrNull(e[f] ?? toEditValue(item[f]));
 
@@ -1190,7 +1205,7 @@ export default function AdminControlPage() {
                                 <div><b>Arbeitszeit</b><span>{format1(arbeitszeit)} h</span><small>{d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}</small></div>
                                 <div><b>Waldzeit</b><span>{format1(geleistet)} h</span><small>ohne Fahrt</small></div>
                                 <div><b>MAS h</b><span>{format1(masTotal)} h</span></div>
-                                <div className={diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25 ? "diffWarn" : "diffOk"}><b>Diff AZ</b><span>{format1(diffArbeitszeit)} h</span></div>
+                                <div className={hasArbeitszeitIssue(diffArbeitszeit) ? "diffWarn" : "diffOk"}><b>Diff AZ</b><span>{format1(diffArbeitszeit)} h</span></div>
                                 <div><b>Komatsu</b><span>{format1(kTotal)} h</span></div>
                                 <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><span>{format1(diffKomatsu)} h</span></div>
                               </div>
@@ -1257,14 +1272,23 @@ export default function AdminControlPage() {
                                       <NumberInput label="Twinch" value={getEdit(it, "twinch_h")} onChange={(v) => updateEdit(it.id, "twinch_h", v)} />
                                     </div>
 
-                                    <label className="sonstigesNote">Sonstiges Bemerkung
-                                      <textarea
-                                        value={getItemText(it, "sonstiges_beschreibung")}
-                                        onChange={(e) => updateItemText(it.id, "sonstiges_beschreibung", e.target.value)}
-                                        placeholder="z.B. Maschine umgesetzt, Weg geräumt..."
-                                      />
-                                    </label>
+                                    <div className="noteGrid">
+                                      <label className="sonstigesNote">Sonstiges Bemerkung
+                                        <textarea
+                                          value={getItemText(it, "sonstiges_beschreibung")}
+                                          onChange={(e) => updateItemText(it.id, "sonstiges_beschreibung", e.target.value)}
+                                          placeholder="z.B. Maschine umgesetzt, Weg geräumt..."
+                                        />
+                                      </label>
 
+                                      <label className="sonstigesNote">Einsatzkommentar
+                                        <textarea
+                                          value={getItemText(it, "kommentar")}
+                                          onChange={(e) => updateItemText(it.id, "kommentar", e.target.value)}
+                                          placeholder="Kommentar zum Einsatz..."
+                                        />
+                                      </label>
+                                    </div>
 
                                   </div>
                                 ))}
@@ -1347,7 +1371,7 @@ const baseStyles = `
 .dayControlPanel{display:grid;gap:6px;margin-top:6px}.compareBox{display:grid;grid-template-columns:.95fr repeat(6,.8fr);gap:5px;border:1px solid #ddd;border-radius:10px;padding:6px;background:rgba(255,255,255,.78);font-size:12px}.compareBox>div,.compareBox>.dateField{display:grid;gap:1px;align-content:start;min-width:0}.compareBox b{font-size:11px}.compareBox span{font-size:13px;font-weight:900}.compareBox small{font-size:10px;opacity:.68}.compareBox input{width:100%;padding:6px;border:1px solid #ccc;border-radius:8px;font-size:12px}.diffWarn{color:#d0003b;font-weight:900}.diffOk{color:#087c24;font-weight:900}.small{font-size:11px;opacity:.72}
 .issueReasons{display:grid;gap:4px;margin-top:6px}.issueBad,.issueWarn{border-radius:8px;padding:5px 8px;font-size:12px;font-weight:900}.issueBad{background:#ffb3b3;border:1px solid #d0003b;color:#6b001d}.issueWarn{background:#ffe58a;border:1px solid #b88700;color:#5a3b00}.flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
 .komatsuBox{border:1px solid #ddd;border-radius:10px;margin-top:6px;padding:7px;background:rgba(255,255,255,.9)}.warnKomatsuBox{border-color:#e0a800;background:#fff1b8}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.05fr .95fr 1.25fr .45fr auto;gap:6px;margin-top:6px;align-items:end}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.komatsuDoneBtn{height:34px;white-space:nowrap;padding:7px 10px}
-.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px;flex-wrap:wrap}.compactDangerBtn{padding:5px 8px;font-size:12px;margin-left:auto}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingActions{width:100%;justify-content:flex-start}.missingActions .btn,.missingActions .btnStatus{flex:1 1 auto}.missingDay{font-size:13px;padding:7px}}
+.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px;flex-wrap:wrap}.compactDangerBtn{padding:5px 8px;font-size:12px;margin-left:auto}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.noteGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.sonstigesNote{display:block;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.noteGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingActions{width:100%;justify-content:flex-start}.missingActions .btn,.missingActions .btnStatus{flex:1 1 auto}.missingDay{font-size:13px;padding:7px}}
 @media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr 1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.komatsuDoneBtn{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
 `;
