@@ -96,6 +96,12 @@ type DayFlags = {
   is_feiertag: boolean;
 };
 
+type DayIssue = {
+  level: "warn" | "bad";
+  label: string;
+  detail: string;
+};
+
 type NumField =
   | "fahrtzeit_min"
   | "mas_start"
@@ -310,6 +316,29 @@ function sumMasHoursLive(items: ItemRow[], edits: Record<string, Partial<Record<
   }, 0);
 
   return round1(total) ?? 0;
+}
+
+function avg(nums: number[]) {
+  if (nums.length === 0) return null;
+  return round1(nums.reduce((sum, n) => sum + n, 0) / nums.length);
+}
+
+function issueClass(issues: DayIssue[]) {
+  if (issues.some((x) => x.level === "bad")) return "badDay";
+  if (issues.some((x) => x.level === "warn")) return "warnDay";
+  return "okDay";
+}
+
+function issueBadgeClass(issues: DayIssue[]) {
+  if (issues.some((x) => x.level === "bad")) return "badStatus";
+  if (issues.some((x) => x.level === "warn")) return "warnStatus";
+  return "okStatus";
+}
+
+function issueText(issues: DayIssue[]) {
+  if (issues.length === 0) return "OK";
+  const first = issues[0].label;
+  return issues.length > 1 ? `${first} +${issues.length - 1}` : first;
 }
 
 export default function AdminControlPage() {
@@ -590,6 +619,83 @@ export default function AdminControlPage() {
     if (source.length === 0) return null;
 
     return round1(source.reduce((sum, it) => sum + (toNumOrNull(getEdit(it, "maschinenstunden_h")) ?? 0), 0));
+  }
+
+
+  function comparableFahrtValues(day: ControlDay, item: ItemRow) {
+    const objectKey = keyPart(getItemText(item, "objekt"));
+    if (!objectKey) return [];
+
+    const values: number[] = [];
+    for (const otherDay of days) {
+      if (otherDay.user_id !== day.user_id || otherDay.id === day.id) continue;
+
+      for (const otherItem of otherDay.items) {
+        if (keyPart(getItemText(otherItem, "objekt")) !== objectKey) continue;
+        const fahrt = toNumOrNull(getEdit(otherItem, "fahrtzeit_min"));
+        if (fahrt !== null) values.push(fahrt);
+      }
+    }
+
+    return values;
+  }
+
+  function getFahrtIssues(day: ControlDay) {
+    const issues: DayIssue[] = [];
+
+    for (const item of day.items) {
+      const fahrt = toNumOrNull(getEdit(item, "fahrtzeit_min"));
+      if (fahrt === null) continue;
+
+      const objekt = getItemText(item, "objekt") || "ohne Objekt";
+      const compareValues = comparableFahrtValues(day, item);
+      const compareAvg = avg(compareValues);
+      const avgText = compareAvg !== null ? ` · Ø gleicher Fahrer/Objekt ${format1(compareAvg)} min` : "";
+
+      if (fahrt > 100) {
+        issues.push({
+          level: "bad",
+          label: "Fahrt >100",
+          detail: `Fahrt ${objekt}: ${format1(fahrt)} min > 100 min${avgText}`,
+        });
+        continue;
+      }
+
+      if (compareAvg !== null && compareAvg > 0 && fahrt > compareAvg * 1.5 && fahrt - compareAvg >= 30) {
+        issues.push({
+          level: "warn",
+          label: "Fahrt hoch",
+          detail: `Fahrt ${objekt}: ${format1(fahrt)} min deutlich über Vergleich ${format1(compareAvg)} min`,
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  function getDayIssues(day: ControlDay, diffKomatsu: number | null, diffArbeitszeit: number | null) {
+    const issues: DayIssue[] = [];
+
+    if (diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5) {
+      issues.push({
+        level: "bad",
+        label: "Diff K",
+        detail: `Komatsu-Differenz ${format1(diffKomatsu)} h > 0,5 h`,
+      });
+    }
+
+    const fahrtIssues = getFahrtIssues(day);
+    issues.push(...fahrtIssues);
+
+    if (diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25) {
+      issues.push({
+        level: "warn",
+        label: "Diff AZ",
+        detail: `Arbeitszeit-Differenz ${format1(diffArbeitszeit)} h > 0,25 h`,
+      });
+    }
+
+    return issues;
   }
 
   async function createDay(driver: DriverRow, date: string, kind: "work" | "urlaub" | "wetter" | "feiertag") {
@@ -1055,14 +1161,8 @@ export default function AdminControlPage() {
                         const diffKomatsu = kTotal === null ? null : round1(masTotal - kTotal);
                         const diffArbeitszeit = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? defaultFlags(d);
-                        const dayTone =
-                          d.is_controlled
-                            ? "controlled"
-                            : diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5
-                              ? "badDay"
-                              : diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25
-                                ? "warnDay"
-                                : "okDay";
+                        const dayIssues = getDayIssues(d, diffKomatsu, diffArbeitszeit);
+                        const dayTone = d.is_controlled ? "controlled" : issueClass(dayIssues);
                         const isOpen = openDays[d.id] ?? d.id === firstOpenDayId;
 
                         return (
@@ -1079,7 +1179,8 @@ export default function AdminControlPage() {
                                 {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
                                 {display.komatsu.length > 0 && <span className="badge komatsu">K {display.komatsu.length}</span>}
                                 {display.komatsu.length === 0 && display.machineKomatsu.length > 0 && <span className="badge warn">K anderer Fahrer {display.machineKomatsu.length}</span>}
-                                {d.is_controlled && <span className="badge done">OK</span>}
+                                <span className={`badge ${issueBadgeClass(dayIssues)}`}>{issueText(dayIssues)}</span>
+                                {d.is_controlled && <span className="badge done">kontrolliert</span>}
                               </div>
                             </summary>
 
@@ -1093,6 +1194,14 @@ export default function AdminControlPage() {
                                 <div><b>Komatsu</b><span>{format1(kTotal)} h</span></div>
                                 <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><span>{format1(diffKomatsu)} h</span></div>
                               </div>
+
+                              {dayIssues.length > 0 && (
+                                <div className="issueReasons">
+                                  {dayIssues.map((issue, issueIdx) => (
+                                    <div key={`${d.id}-issue-${issueIdx}`} className={issue.level === "bad" ? "issueBad" : "issueWarn"}>{issue.detail}</div>
+                                  ))}
+                                </div>
+                              )}
 
                               <div className="flagsCommentGrid">
                                 <div className="flagsRow">
@@ -1234,9 +1343,9 @@ const baseStyles = `
 .checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}.bad{color:crimson;font-weight:800}
 .weeks{display:grid;gap:10px;margin-top:10px}.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}.plus{display:inline-block;transition:transform .12s ease;font-size:19px}details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
 .drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:7px}.dayCard.okDay{background:#e6f7e9;border-color:#54c26e}.dayCard.warnDay{background:#fff1b8;border-color:#e0a800}.dayCard.badDay{background:#ffe1e1;border-color:#e05a5a}.dayCard.controlled{background:#dff4e5;border-color:#3fb95f}
-.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingActions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:flex-start}.btnStatus{border:1px solid #ddd;background:#fff;font-weight:900;cursor:pointer;padding:8px 10px;border-radius:10px}.weatherBtn{background:#cbe4ff;border-color:#559cdf}.holidayBtn{background:#b9efc7;border-color:#38b65a}.feastBtn{background:#ffe082;border-color:#e0a800}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
+.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingActions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:flex-start}.btnStatus{border:1px solid #ddd;background:#fff;font-weight:900;cursor:pointer;padding:8px 10px;border-radius:10px}.weatherBtn{background:#cbe4ff;border-color:#559cdf}.holidayBtn{background:#b9efc7;border-color:#38b65a}.feastBtn{background:#ffe082;border-color:#e0a800}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.okStatus{background:#7ee49a;border:1px solid #1d9b3f;color:#063d14}.badge.warnStatus{background:#ffd43b;border:1px solid #b88700;color:#5a3b00}.badge.badStatus{background:#ff8b8b;border:1px solid #d0003b;color:#6b001d}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
 .dayControlPanel{display:grid;gap:6px;margin-top:6px}.compareBox{display:grid;grid-template-columns:.95fr repeat(6,.8fr);gap:5px;border:1px solid #ddd;border-radius:10px;padding:6px;background:rgba(255,255,255,.78);font-size:12px}.compareBox>div,.compareBox>.dateField{display:grid;gap:1px;align-content:start;min-width:0}.compareBox b{font-size:11px}.compareBox span{font-size:13px;font-weight:900}.compareBox small{font-size:10px;opacity:.68}.compareBox input{width:100%;padding:6px;border:1px solid #ccc;border-radius:8px;font-size:12px}.diffWarn{color:#d0003b;font-weight:900}.diffOk{color:#087c24;font-weight:900}.small{font-size:11px;opacity:.72}
-.flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
+.issueReasons{display:grid;gap:4px;margin-top:6px}.issueBad,.issueWarn{border-radius:8px;padding:5px 8px;font-size:12px;font-weight:900}.issueBad{background:#ffb3b3;border:1px solid #d0003b;color:#6b001d}.issueWarn{background:#ffe58a;border:1px solid #b88700;color:#5a3b00}.flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
 .komatsuBox{border:1px solid #ddd;border-radius:10px;margin-top:6px;padding:7px;background:rgba(255,255,255,.9)}.warnKomatsuBox{border-color:#e0a800;background:#fff1b8}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.05fr .95fr 1.25fr .45fr auto;gap:6px;margin-top:6px;align-items:end}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.komatsuDoneBtn{height:34px;white-space:nowrap;padding:7px 10px}
 .items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px;flex-wrap:wrap}.compactDangerBtn{padding:5px 8px;font-size:12px;margin-left:auto}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 @media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingActions{width:100%;justify-content:flex-start}.missingActions .btn,.missingActions .btnStatus{flex:1 1 auto}.missingDay{font-size:13px;padding:7px}}
