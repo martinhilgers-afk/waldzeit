@@ -863,7 +863,7 @@ export default function AdminControlPage() {
     for (const d of days) actualByDriverDate.set(`${d.user_id}__${d.date}`, d);
 
     const relevantDrivers = (selectedDriver ? drivers.filter((d) => d.user_id === selectedDriver) : drivers).filter((d) => d.is_active !== false);
-    const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? 1 : -1));
+    const weekKeys = Array.from(weekDateMap.keys()).sort((a, b) => (a < b ? -1 : 1));
     const result: WeekGroup[] = [];
 
     for (const weekKey of weekKeys) {
@@ -901,6 +901,21 @@ export default function AdminControlPage() {
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days, drivers, komatsuRows, komatsuEdits, from, to, selectedDriver, onlyUnchecked]);
+
+  const firstOpenDayId = useMemo(() => {
+    for (const week of grouped) {
+      for (const driverGroup of week.drivers) {
+        for (const display of driverGroup.days) {
+          if (!display.day) continue;
+
+          const hasOpenKomatsu = [...display.komatsu, ...display.machineKomatsu].some((k) => !k.is_checked);
+          if (!display.day.is_controlled || hasOpenKomatsu) return display.day.id;
+        }
+      }
+    }
+
+    return "";
+  }, [grouped]);
 
   if (admin === null) {
     return (
@@ -959,7 +974,7 @@ export default function AdminControlPage() {
 
       <div className="weeks">
         {grouped.map((w, idx) => (
-          <details key={w.key} className="weekCard" open={idx === 0}>
+          <details key={w.key} className="weekCard" open>
             <summary className="weekSummary"><span className="plus">＋</span><span>{w.key}</span></summary>
 
             <div className="drivers">
@@ -1004,10 +1019,18 @@ export default function AdminControlPage() {
                         const diffKomatsu = kTotal === null ? null : round1(masTotal - kTotal);
                         const diffArbeitszeit = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? defaultFlags(d);
-                        const isOpen = openDays[d.id] ?? false;
+                        const dayTone =
+                          d.is_controlled
+                            ? "controlled"
+                            : diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5
+                              ? "badDay"
+                              : diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25
+                                ? "warnDay"
+                                : "okDay";
+                        const isOpen = openDays[d.id] ?? d.id === firstOpenDayId;
 
                         return (
-                          <details key={d.id} className={d.is_controlled ? "dayCard controlled" : "dayCard"} open={isOpen} onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}>
+                          <details key={d.id} className={`dayCard ${dayTone}`} open={isOpen} onToggle={(e) => setDayOpen(d.id, (e.currentTarget as HTMLDetailsElement).open)}>
                             <summary className="daySummary">
                               <div className="dayMain">
                                 <b>{weekdayDE(d.date)} {fmtDE(d.date)}</b>
@@ -1024,26 +1047,30 @@ export default function AdminControlPage() {
                               </div>
                             </summary>
 
-                            <div className="compareBox">
-                              <div><b>Datum</b><br /><input type="date" value={dateEdits[d.id] ?? d.date} onChange={(e) => setDateEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} /></div>
-                              <div><b>Arbeitszeit</b><br />{format1(arbeitszeit)} h <span className="small">{d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}</span></div>
-                              <div><b>Waldzeit</b><br />{format1(geleistet)} h <span className="small">ohne Fahrt</span></div>
-                              <div><b>MAS h</b><br />{format1(masTotal)} h</div>
-                              <div className={diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25 ? "diffWarn" : "diffOk"}><b>Diff AZ</b><br />{format1(diffArbeitszeit)} h</div>
-                              <div><b>Komatsu</b><br />{format1(kTotal)} h</div>
-                              <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><br />{format1(diffKomatsu)} h</div>
-                            </div>
+                            <div className="dayControlPanel">
+                              <div className="compareBox">
+                                <label className="dateField"><b>Datum</b><input type="date" value={dateEdits[d.id] ?? d.date} onChange={(e) => setDateEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} /></label>
+                                <div><b>Arbeitszeit</b><span>{format1(arbeitszeit)} h</span><small>{d.arbeitsbeginn || "--:--"} - {d.arbeitsende || "--:--"}</small></div>
+                                <div><b>Waldzeit</b><span>{format1(geleistet)} h</span><small>ohne Fahrt</small></div>
+                                <div><b>MAS h</b><span>{format1(masTotal)} h</span></div>
+                                <div className={diffArbeitszeit !== null && Math.abs(diffArbeitszeit) > 0.25 ? "diffWarn" : "diffOk"}><b>Diff AZ</b><span>{format1(diffArbeitszeit)} h</span></div>
+                                <div><b>Komatsu</b><span>{format1(kTotal)} h</span></div>
+                                <div className={diffKomatsu !== null && Math.abs(diffKomatsu) > 0.5 ? "diffWarn" : "diffOk"}><b>Diff K</b><span>{format1(diffKomatsu)} h</span></div>
+                              </div>
 
-                            <div className="flagsRow">
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />Urlaub</label>
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />Wetter</label>
-                              <label className="flagBox"><input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />Feiertag</label>
-                              <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">+ Einsatz hinzufügen</button>
-                            </div>
+                              <div className="flagsCommentGrid">
+                                <div className="flagsRow">
+                                  <label className="flagBox"><input type="checkbox" checked={flags.is_urlaub} onChange={(e) => updateDayFlag(d.id, "is_urlaub", e.target.checked)} />Urlaub</label>
+                                  <label className="flagBox"><input type="checkbox" checked={flags.is_wetter} onChange={(e) => updateDayFlag(d.id, "is_wetter", e.target.checked)} />Wetter</label>
+                                  <label className="flagBox"><input type="checkbox" checked={flags.is_feiertag} onChange={(e) => updateDayFlag(d.id, "is_feiertag", e.target.checked)} />Feiertag</label>
+                                  <button type="button" onClick={() => addItemToDay(d)} disabled={busy} className="btn">+ Einsatz hinzufügen</button>
+                                </div>
 
-                            <label className="commentEdit">Tageskommentar
-                              <textarea value={commentEdits[d.id] ?? ""} onChange={(e) => setCommentEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} placeholder="Tageskommentar..." />
-                            </label>
+                                <label className="commentEdit">Tageskommentar
+                                  <textarea value={commentEdits[d.id] ?? ""} onChange={(e) => setCommentEdits((prev) => ({ ...prev, [d.id]: e.target.value }))} placeholder="Tageskommentar..." />
+                                </label>
+                              </div>
+                            </div>
 
                             {kDisplayRows.length > 0 && (
                               <section className={display.komatsu.length > 0 ? "komatsuBox" : "komatsuBox warnKomatsuBox"}>
@@ -1164,16 +1191,16 @@ const baseStyles = `
 .head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
 .h1{margin:0;font-size:32px;line-height:1.1}.h2{margin:0 0 8px 0;font-size:20px}.sub{opacity:.82;margin-top:4px}.topActions{display:flex;gap:8px;flex-wrap:wrap}
 .btn,.btnPrimary{border:1px solid #ddd;background:#fff;font-weight:800;cursor:pointer}.btn{padding:8px 10px;border-radius:10px}.btnPrimary{padding:10px 12px;border-radius:10px;font-weight:900;background:#fafafa}
-.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:14px;padding:10px;background:#fff}.card{margin-top:10px}.compactCard{padding:10px}
+.card,.weekCard,.dayCard,.driverCard{border:1px solid #eee;border-radius:14px;padding:10px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.03)}.card{margin-top:10px}.compactCard{padding:10px}
 .filterGrid{display:grid;grid-template-columns:1fr 1fr 1.3fr auto auto;gap:8px;align-items:end}.field{display:block;font-size:13px;font-weight:800}.control{width:100%;padding:9px;font-size:15px;margin-top:4px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
 .checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}.bad{color:crimson;font-weight:800}
 .weeks{display:grid;gap:10px;margin-top:10px}.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}.plus{display:inline-block;transition:transform .12s ease;font-size:19px}details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
-.drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:8px}.dayCard.controlled{background:#fbfffb;border-color:#c7f2d5}
-.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#ecfdf3;border:1px solid #c7f2d5}.badge.blue{background:#eef6ff;border:1px solid #cfe4ff}.badge.holiday{background:#fff4cc;border:1px solid #f1d37a}.badge.done{background:#e2f0d9;border:1px solid #b6d7a8}.badge.komatsu{background:#f7f7f7;border:1px solid #ddd}.badge.warn{background:#fff4cc;border:1px solid #f1d37a}
-.compareBox{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:8px;border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa;font-size:13px}.compareBox input{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px}.diffWarn{color:crimson;font-weight:900}.diffOk{color:green;font-weight:900}.small{font-size:11px;opacity:.72}
-.flagsRow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.flagBox{display:flex;gap:6px;align-items:center;border:1px solid #eee;border-radius:10px;padding:7px 10px;background:#fff;font-weight:900;font-size:13px}.commentEdit{display:block;margin-top:8px;font-weight:800;font-size:13px}.commentEdit textarea{width:100%;min-height:48px;margin-top:4px;padding:8px;border:1px solid #ddd;border-radius:10px;font-size:14px;box-sizing:border-box}
-.komatsuBox{border:1px solid #eee;border-radius:12px;margin-top:8px;padding:8px;background:#fff}.warnKomatsuBox{border-color:#f1d37a;background:#fffdf5}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.1fr 1fr 1.3fr .5fr;gap:6px;margin-top:6px}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.kActions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
-.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #eee;border-radius:10px;padding:8px;background:#fafafa}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingDay{font-size:13px;padding:7px}}
-@media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.kActions .btn,.kActions .btnPrimary{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
+.drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:7px}.dayCard.okDay{background:#e6f7e9;border-color:#54c26e}.dayCard.warnDay{background:#fff1b8;border-color:#e0a800}.dayCard.badDay{background:#ffe1e1;border-color:#e05a5a}.dayCard.controlled{background:#dff4e5;border-color:#3fb95f}
+.missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
+.dayControlPanel{display:grid;gap:6px;margin-top:6px}.compareBox{display:grid;grid-template-columns:.95fr repeat(6,.8fr);gap:5px;border:1px solid #ddd;border-radius:10px;padding:6px;background:rgba(255,255,255,.78);font-size:12px}.compareBox>div,.compareBox>.dateField{display:grid;gap:1px;align-content:start;min-width:0}.compareBox b{font-size:11px}.compareBox span{font-size:13px;font-weight:900}.compareBox small{font-size:10px;opacity:.68}.compareBox input{width:100%;padding:6px;border:1px solid #ccc;border-radius:8px;font-size:12px}.diffWarn{color:#d0003b;font-weight:900}.diffOk{color:#087c24;font-weight:900}.small{font-size:11px;opacity:.72}
+.flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
+.komatsuBox{border:1px solid #ddd;border-radius:10px;margin-top:6px;padding:7px;background:rgba(255,255,255,.9)}.warnKomatsuBox{border-color:#e0a800;background:#fff1b8}.warnText{margin:0 0 6px 0;color:#8a5b00;font-weight:800}.komatsuBox h3{margin:0 0 6px 0;font-size:16px}.kRows{display:grid;gap:6px}.kRow{border:1px solid #eee;border-radius:10px;padding:7px;background:#fafafa}.kTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px}.kGrid{display:grid;grid-template-columns:1.1fr 1fr 1.3fr .5fr;gap:6px;margin-top:6px}.kGrid label{font-size:11px;font-weight:900}.kGrid input,.kGrid select{width:100%;padding:7px;border:1px solid #ddd;border-radius:9px;background:#fff}.kActions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+.items{display:grid;gap:7px;margin-top:8px}.itemRow{border:1px solid #ddd;border-radius:10px;padding:7px;background:rgba(255,255,255,.88)}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px}.selectGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.selectField{font-size:11px;font-weight:900}.selectField select{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.editGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:7px}.numField{font-size:11px;font-weight:800;opacity:.95}.numField input{width:100%;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:14px;box-sizing:border-box;background:#fff}.empty{margin-top:8px;opacity:.65;font-size:13px}.sonstigesNote{display:block;margin-top:7px;font-size:11px;font-weight:900}.sonstigesNote textarea{width:100%;min-height:42px;margin-top:3px;padding:7px;border:1px solid #ddd;border-radius:9px;font-size:13px;box-sizing:border-box}.itemActions{display:flex;justify-content:flex-end;margin-top:7px}.dangerBtn{border:1px solid #d32f2f;background:#d32f2f;color:#fff;font-weight:900;cursor:pointer;border-radius:10px;padding:7px 10px}.dangerBtn:hover{background:#b71c1c}.dayActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:900px){.wrap{margin:10px auto;padding:6px}.h1{font-size:26px}.head{flex-direction:column;align-items:stretch}.topActions{gap:6px}.topActions .btn{flex:1}.filterGrid{grid-template-columns:1fr 1fr}.filterGrid .field:nth-child(3),.filterGrid .checkBox,.filterGrid .btnPrimary{grid-column:1 / -1}.weekCard,.driverCard,.dayCard,.card{padding:8px;border-radius:12px}.driverSummary{flex-wrap:wrap}.driverMeta{width:100%;margin-left:28px}.weekActions .btnPrimary{width:100%}.daySummary{align-items:flex-start;gap:6px}.dayMain{display:grid;gap:2px}.miniStats{font-size:11px}.badges{justify-content:flex-start}.compareBox{grid-template-columns:1fr 1fr 1fr;font-size:12px;padding:6px}.flagsCommentGrid{grid-template-columns:1fr}.selectGrid{grid-template-columns:1fr}.editGrid{grid-template-columns:repeat(3,1fr)}.kGrid{grid-template-columns:1fr 1fr}.dayActions .btn,.dayActions .btnPrimary,.itemActions .dangerBtn{width:100%}.missingDay{font-size:13px;padding:7px}}
+@media(max-width:480px){.filterGrid{grid-template-columns:1fr}.compareBox{grid-template-columns:1fr 1fr}.editGrid{grid-template-columns:repeat(2,1fr)}.kGrid{grid-template-columns:1fr}.kActions .btn,.kActions .btnPrimary{width:100%}.btn,.btnPrimary{padding:9px 10px}.weekSummary,.driverSummary{font-size:15px}}
 `;
