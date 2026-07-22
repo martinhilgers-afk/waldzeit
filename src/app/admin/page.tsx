@@ -5,7 +5,16 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { getMe } from "@/lib/me";
 
-type Row = {
+type ObjectStatus = "active" | "inactive" | "completed";
+
+type ObjectRow = {
+  id: string;
+  name: string;
+  status: ObjectStatus;
+  created_at: string;
+};
+
+type MachineRow = {
   id: string;
   name: string;
   is_active: boolean;
@@ -46,8 +55,8 @@ export default function AdminPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
 
-  const [objects, setObjects] = useState<Row[]>([]);
-  const [machines, setMachines] = useState<Row[]>([]);
+  const [objects, setObjects] = useState<ObjectRow[]>([]);
+  const [machines, setMachines] = useState<MachineRow[]>([]);
   const [drivers, setDrivers] = useState<DriverRow[]>([]);
 
   const [newObject, setNewObject] = useState("");
@@ -87,7 +96,7 @@ export default function AdminPage() {
     setBusy(true);
 
     const [o, m, d] = await Promise.all([
-      supabase.from("objects").select("*").order("is_active", { ascending: false }).order("name", { ascending: true }),
+      supabase.from("objects").select("id,name,status,created_at").order("status", { ascending: true }).order("name", { ascending: true }),
       supabase.from("machines").select("*").order("is_active", { ascending: false }).order("name", { ascending: true }),
       supabase
         .from("driver_profiles")
@@ -130,7 +139,10 @@ export default function AdminPage() {
     setMsg("Speichern...");
     setBusy(true);
 
-    const payload: any = { name };
+    const payload: any =
+      kind === "objects"
+        ? { name, status: "active" as ObjectStatus }
+        : { name };
 
     if (kind === "machines") {
       payload.hourly_rate = toNumOrNull(newMachineHourlyRate);
@@ -159,11 +171,42 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function toggleActive(kind: "objects" | "machines", row: Row) {
+  async function setObjectStatus(row: ObjectRow, status: ObjectStatus) {
+    if (status === row.status) return;
+
+    if (status === "completed") {
+      const ok = confirm(
+        `Los wirklich abschließen?\n\n${row.name}\n\n` +
+          "Das Los wird danach:\n" +
+          "• beim Fahrer nicht mehr auswählbar sein\n" +
+          "• auf der Kontrollseite ausgeblendet\n" +
+          "• aus allen Exporten entfernt\n\n" +
+          "Bereits gespeicherte Daten bleiben in der Datenbank erhalten."
+      );
+
+      if (!ok) return;
+    }
+
     setMsg("Speichern...");
     setBusy(true);
 
-    const { error } = await supabase.from(kind).update({ is_active: !row.is_active }).eq("id", row.id);
+    const { error } = await supabase.from("objects").update({ status }).eq("id", row.id);
+
+    setBusy(false);
+    if (error) {
+      setMsg("Fehler Objektstatus: " + error.message);
+      return;
+    }
+
+    setMsg("✅ Objektstatus aktualisiert");
+    await loadAll();
+  }
+
+  async function toggleMachineActive(row: MachineRow) {
+    setMsg("Speichern...");
+    setBusy(true);
+
+    const { error } = await supabase.from("machines").update({ is_active: !row.is_active }).eq("id", row.id);
 
     setBusy(false);
     if (error) {
@@ -175,7 +218,7 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function rename(kind: "objects" | "machines", row: Row) {
+  async function rename(kind: "objects" | "machines", row: ObjectRow | MachineRow) {
     const next = normName(prompt("Neuer Name:", row.name) || "");
     if (!next || next === row.name) return;
 
@@ -194,7 +237,7 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function remove(kind: "objects" | "machines", row: Row) {
+  async function remove(kind: "objects" | "machines", row: ObjectRow | MachineRow) {
     if (!confirm(`Wirklich löschen?\n\n${row.name}`)) return;
 
     setMsg("Löschen...");
@@ -212,7 +255,7 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function setMachineHourlyRate(row: Row) {
+  async function setMachineHourlyRate(row: MachineRow) {
     const current = row.hourly_rate ?? "";
     const raw = prompt("Stundenpreis Maschine:", String(current).replace(".", ",")) || "";
     const next = toNumOrNull(raw);
@@ -232,7 +275,7 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function setMachineType(row: Row, machineType: string) {
+  async function setMachineType(row: MachineRow, machineType: string) {
     setMsg("Speichern...");
     setBusy(true);
 
@@ -248,7 +291,7 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  async function setMachineSerialNumber(row: Row) {
+  async function setMachineSerialNumber(row: MachineRow) {
     const next = normName(prompt("Seriennummer:", row.serial_number ?? "") || "");
 
     setMsg("Speichern...");
@@ -413,7 +456,9 @@ export default function AdminPage() {
     await loadAll();
   }
 
-  const activeObjects = useMemo(() => objects.filter((x) => x.is_active), [objects]);
+  const activeObjects = useMemo(() => objects.filter((x) => x.status === "active"), [objects]);
+  const inactiveObjects = useMemo(() => objects.filter((x) => x.status === "inactive"), [objects]);
+  const completedObjects = useMemo(() => objects.filter((x) => x.status === "completed"), [objects]);
   const activeMachines = useMemo(() => machines.filter((x) => x.is_active), [machines]);
   const activeDrivers = useMemo(() => drivers.filter((x) => x.is_active), [drivers]);
 
@@ -485,7 +530,7 @@ export default function AdminPage() {
             <span className="plus">＋</span>
             <span>Objekte</span>
             <span className="count">
-              Aktiv: {activeObjects.length} / Gesamt: {objects.length}
+              Aktiv: {activeObjects.length} · Deaktiviert: {inactiveObjects.length} · Abgeschlossen: {completedObjects.length} · Gesamt: {objects.length}
             </span>
           </summary>
 
@@ -499,19 +544,34 @@ export default function AdminPage() {
 
             <div className="list">
               {objects.map((o) => (
-                <div key={o.id} className="listRow">
+                <div key={o.id} className={`listRow objectRow object-${o.status}`}>
                   <div style={{ minWidth: 220 }}>
-                    <b>{o.name}</b> {!o.is_active && <span style={{ color: "crimson", marginLeft: 8 }}>(inaktiv)</span>}
+                    <b>{o.name}</b>
+                    <span className={`statusBadge status-${o.status}`}>
+                      {o.status === "active"
+                        ? "🟢 Aktiv"
+                        : o.status === "inactive"
+                          ? "🟡 Deaktiviert"
+                          : "⚫ Abgeschlossen"}
+                    </span>
                   </div>
 
                   <div className="actions">
-                    <button type="button" onClick={() => toggleActive("objects", o)} disabled={busy} className="smallBtn">
-                      {o.is_active ? "Deaktivieren" : "Aktivieren"}
-                    </button>
+                    <select
+                      value={o.status}
+                      onChange={(e) => setObjectStatus(o, e.target.value as ObjectStatus)}
+                      disabled={busy}
+                      className="smallSelect statusSelect"
+                    >
+                      <option value="active">🟢 Aktiv</option>
+                      <option value="inactive">🟡 Deaktiviert</option>
+                      <option value="completed">⚫ Abgeschlossen</option>
+                    </select>
+
                     <button type="button" onClick={() => rename("objects", o)} disabled={busy} className="smallBtn">
                       Umbenennen
                     </button>
-                    <button type="button" onClick={() => remove("objects", o)} disabled={busy} className="smallBtn">
+                    <button type="button" onClick={() => remove("objects", o)} disabled={busy} className="smallBtn dangerBtn">
                       Löschen
                     </button>
                   </div>
@@ -670,7 +730,7 @@ export default function AdminPage() {
                       Seriennr.
                     </button>
 
-                    <button type="button" onClick={() => toggleActive("machines", m)} disabled={busy} className="smallBtn">
+                    <button type="button" onClick={() => toggleMachineActive(m)} disabled={busy} className="smallBtn">
                       {m.is_active ? "Deaktivieren" : "Aktivieren"}
                     </button>
 
@@ -791,6 +851,63 @@ export default function AdminPage() {
           display: grid;
           gap: 8px;
           margin-top: 10px;
+        }
+
+        .objectRow {
+          transition: opacity 0.12s ease, background 0.12s ease;
+        }
+
+        .object-active {
+          background: #f6fff8;
+          border-color: #b7dfc0;
+        }
+
+        .object-inactive {
+          background: #fffaf0;
+          border-color: #ead28b;
+        }
+
+        .object-completed {
+          background: #f3f3f3;
+          border-color: #cfcfcf;
+          opacity: 0.78;
+        }
+
+        .statusBadge {
+          display: inline-block;
+          margin-left: 8px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 900;
+        }
+
+        .status-active {
+          background: #dcf7e3;
+          border: 1px solid #5ab66e;
+          color: #145626;
+        }
+
+        .status-inactive {
+          background: #fff0b3;
+          border: 1px solid #c89a00;
+          color: #6f5100;
+        }
+
+        .status-completed {
+          background: #dedede;
+          border: 1px solid #999;
+          color: #444;
+        }
+
+        .statusSelect {
+          min-width: 175px;
+          font-weight: 800;
+        }
+
+        .dangerBtn {
+          color: #a40000;
+          border-color: #e0aaaa;
         }
 
         .listRow {
