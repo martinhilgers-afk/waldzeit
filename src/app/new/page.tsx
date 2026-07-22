@@ -127,12 +127,22 @@ export default function NewWorkday() {
       setDefaultMachine(String((me as any).default_machine || ""));
 
       const [o, m] = await Promise.all([
-        supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
+        supabase.from("objects").select("name").eq("status", "active").order("name", { ascending: true }),
         supabase.from("machines").select("name").eq("is_active", true).order("name", { ascending: true }),
       ]);
 
-      setObjectOptions(((o.data as any[]) ?? []).map((x) => x.name));
+      const activeObjects = ((o.data as any[]) ?? []).map((x) => String(x.name || "").trim()).filter(Boolean);
+      setObjectOptions(activeObjects);
       setMachineOptions(((m.data as any[]) ?? []).map((x) => x.name));
+
+      // Ein eventuell gespeichertes Los darf nur vorausgewählt bleiben,
+      // wenn es weiterhin den Status "active" hat.
+      setItems((prev) =>
+        prev.map((it) => {
+          if (!it.objekt.trim()) return it;
+          return activeObjects.includes(it.objekt.trim()) ? it : { ...it, objekt: "" };
+        })
+      );
     })();
   }, []);
 
@@ -142,12 +152,12 @@ export default function NewWorkday() {
     const lsKey = `waldzeit:last_objekt:${userId}`;
     const cached = typeof window !== "undefined" ? localStorage.getItem(lsKey) : null;
 
-    if (cached && cached.trim()) {
+    if (cached && cached.trim() && objectOptions.includes(cached.trim())) {
       setItems((prev) =>
         prev.map((it, idx) => {
           if (idx !== 0) return it;
           if (it.objekt.trim()) return it;
-          return { ...it, objekt: cached };
+          return { ...it, objekt: cached.trim() };
         })
       );
     }
@@ -175,7 +185,7 @@ export default function NewWorkday() {
       if (itemErr || !last || last.length === 0) return;
 
       const lastObj = String((last as any[])[0]?.objekt || "").trim();
-      if (!lastObj) return;
+      if (!lastObj || !objectOptions.includes(lastObj)) return;
 
       try {
         localStorage.setItem(lsKey, lastObj);
@@ -189,7 +199,7 @@ export default function NewWorkday() {
         })
       );
     })();
-  }, [userId]);
+  }, [userId, objectOptions]);
 
   useEffect(() => {
     const dm = defaultMachine.trim();
@@ -438,7 +448,12 @@ export default function NewWorkday() {
 
       items.forEach((it, idx) => {
         const n = idx + 1;
-        if (!it.objekt.trim()) errs.push(`Einsatz ${n}: Objekt fehlt.`);
+        if (!it.objekt.trim()) {
+          errs.push(`Einsatz ${n}: Objekt fehlt.`);
+        } else if (!objectOptions.includes(it.objekt.trim())) {
+          errs.push(`Einsatz ${n}: Das gewählte Los ist nicht mehr aktiv und kann nicht gespeichert werden.`);
+        }
+
         if (!it.maschine.trim()) errs.push(`Einsatz ${n}: Maschine fehlt.`);
 
         const sonstH = toNumOrNull(it.sonstiges_h) ?? 0;
@@ -472,7 +487,7 @@ export default function NewWorkday() {
     }
 
     return errs;
-  }, [date, arbeitsbeginn, arbeitsende, items, isSpecialDay]);
+  }, [date, arbeitsbeginn, arbeitsende, items, isSpecialDay, objectOptions]);
 
   async function save() {
     if (!userId) return;

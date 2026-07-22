@@ -16,6 +16,7 @@ type OptionRow = {
   id: string;
   name: string;
   is_active?: boolean | null;
+  status?: "active" | "inactive" | "completed" | null;
   serial_number?: string | null;
 };
 
@@ -391,7 +392,7 @@ export default function AdminControlPage() {
 
     const [dRes, objRes, machRes] = await Promise.all([
       supabase.from("driver_profiles").select("user_id,username,full_name,is_active").order("full_name", { ascending: true }),
-      supabase.from("objects").select("id,name,is_active").eq("is_active", true).order("name", { ascending: true }),
+      supabase.from("objects").select("id,name,status").order("name", { ascending: true }),
       supabase.from("machines").select("id,name,is_active,serial_number").eq("is_active", true).order("name", { ascending: true }),
     ]);
 
@@ -402,7 +403,13 @@ export default function AdminControlPage() {
     }
 
     const driverRows = (((dRes.data as any[]) ?? []) as DriverRow[]).sort(sortByLastname);
-    const objectRows = (((objRes.data as any[]) ?? []) as OptionRow[]);
+    const allObjectRows = (((objRes.data as any[]) ?? []) as OptionRow[]);
+    const objectRows = allObjectRows.filter((o) => o.status !== "completed");
+    const completedObjectNames = new Set(
+      allObjectRows
+        .filter((o) => o.status === "completed")
+        .map((o) => keyPart(o.name))
+    );
     const machineRows = (((machRes.data as any[]) ?? []) as OptionRow[]);
 
     setDrivers(driverRows);
@@ -447,7 +454,9 @@ export default function AdminControlPage() {
         return;
       }
 
-      itemRows = ((itemRes.data as any[]) ?? []) as ItemRow[];
+      itemRows = (((itemRes.data as any[]) ?? []) as ItemRow[]).filter(
+        (item) => !completedObjectNames.has(keyPart(item.objekt))
+      );
     }
 
     const kRes = await supabase
@@ -503,6 +512,9 @@ export default function AdminControlPage() {
 
     const rawKomatsu = (((kRes.data as any[]) ?? []) as KomatsuRow[]).filter((k) => {
       const h = komatsuHours(k);
+      const objectName = komatsuEffectiveObject(k);
+
+      if (completedObjectNames.has(keyPart(objectName))) return false;
       if (h === null || h <= 1) return false;
       if (onlyUnchecked && k.is_checked) return false;
       return true;
@@ -717,7 +729,7 @@ export default function AdminControlPage() {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (isWork && !defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+    if (isWork && !defaultObject) return setMsg("Fehler: Kein verfügbares Los vorhanden. Bitte zuerst ein aktives oder deaktiviertes Los anlegen.");
     if (isWork && !defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
 
     setBusy(true);
@@ -798,7 +810,7 @@ export default function AdminControlPage() {
     const defaultObject = objects[0]?.name ?? "";
     const defaultMachine = machines[0]?.name ?? "";
 
-    if (!defaultObject) return setMsg("Fehler: Kein aktives Objekt vorhanden. Bitte zuerst ein Objekt anlegen.");
+    if (!defaultObject) return setMsg("Fehler: Kein verfügbares Los vorhanden. Bitte zuerst ein aktives oder deaktiviertes Los anlegen.");
     if (!defaultMachine) return setMsg("Fehler: Keine aktive Maschine vorhanden. Bitte zuerst eine Maschine anlegen.");
 
     setBusy(true);

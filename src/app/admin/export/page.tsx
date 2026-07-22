@@ -30,6 +30,11 @@ type MachineRow = {
   machine_type: string | null;
 };
 
+type ObjectRow = {
+  name: string;
+  status: "active" | "inactive" | "completed";
+};
+
 type DayRow = {
   id: string;
   user_id: string;
@@ -852,6 +857,7 @@ export default function AdminExportPage() {
   const [machines, setMachines] = useState<string[]>([]);
   const [machineRows, setMachineRows] = useState<MachineRow[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
+  const [completedObjectNames, setCompletedObjectNames] = useState<Set<string>>(new Set());
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
@@ -871,10 +877,16 @@ export default function AdminExportPage() {
   const needsDriver = useMemo(() => mode === "driver_range" || mode === "driver_object", [mode]);
   const needsObject = useMemo(() => mode === "machine_object" || mode === "driver_object" || mode === "all_object", [mode]);
 
+  useEffect(() => {
+    if (selectedObject && completedObjectNames.has(selectedObject.trim())) {
+      setSelectedObject("");
+    }
+  }, [completedObjectNames, selectedObject]);
+
   async function loadSelectors() {
     const [m, o, d] = await Promise.all([
       supabase.from("machines").select("name,hourly_rate,machine_type").eq("is_active", true).order("name", { ascending: true }),
-      supabase.from("objects").select("name").eq("is_active", true).order("name", { ascending: true }),
+      supabase.from("objects").select("name,status").order("name", { ascending: true }),
       supabase
         .from("driver_profiles")
         .select("user_id,username,full_name,hourly_wage,is_active")
@@ -886,7 +898,24 @@ export default function AdminExportPage() {
     setMachineRows(machineData);
     setMachines(machineData.map((x) => x.name));
 
-    setObjects(((o.data as any[]) ?? []).map((x) => x.name));
+    const objectRows = (((o.data as any[]) ?? []) as ObjectRow[]);
+
+    // Im Export bleiben aktive und deaktivierte Lose sichtbar.
+    // Abgeschlossene Lose werden weder angeboten noch exportiert.
+    const visibleObjects = objectRows
+      .filter((x) => x.status !== "completed")
+      .map((x) => String(x.name || "").trim())
+      .filter(Boolean);
+
+    const completedNames = new Set(
+      objectRows
+        .filter((x) => x.status === "completed")
+        .map((x) => String(x.name || "").trim())
+        .filter(Boolean)
+    );
+
+    setObjects(visibleObjects);
+    setCompletedObjectNames(completedNames);
 
     const drvRows = (((d.data as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
 
@@ -937,6 +966,37 @@ export default function AdminExportPage() {
     setLoading(true);
     setMsg("Export wird geladen...");
 
+    // Status der Lose unmittelbar vor jedem Export neu laden.
+    // So kann auch ein zwischenzeitlich abgeschlossenes Los niemals
+    // in einer normalen Auswertung oder in der Los-Auswertung erscheinen.
+    const { data: currentObjectData, error: currentObjectError } = await supabase
+      .from("objects")
+      .select("name,status");
+
+    if (currentObjectError) {
+      setLoading(false);
+      setMsg("Fehler Objektstatus laden: " + currentObjectError.message);
+      return;
+    }
+
+    const currentObjectRows = (((currentObjectData as any[]) ?? []) as ObjectRow[]);
+    const currentCompletedObjectNames = new Set(
+      currentObjectRows
+        .filter((x) => x.status === "completed")
+        .map((x) => String(x.name || "").trim())
+        .filter(Boolean)
+    );
+
+    setCompletedObjectNames(currentCompletedObjectNames);
+
+    if (selectedObject && currentCompletedObjectNames.has(selectedObject.trim())) {
+      setSelectedObject("");
+      setLoading(false);
+      setMsg("Dieses Los wurde inzwischen abgeschlossen und kann nicht mehr exportiert werden.");
+      await loadSelectors();
+      return;
+    }
+
     let q = supabase
       .from("workdays")
       .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter")
@@ -974,6 +1034,19 @@ export default function AdminExportPage() {
 
       items = ((itemData as any[]) ?? []) as ItemRow[];
     }
+
+    // Zentrale Exportregel:
+    // - active: sichtbar
+    // - inactive: sichtbar
+    // - completed: vollständig aus allen Exporten entfernen
+    //
+    // Einträge ohne Objektname oder mit einem historischen Namen, der nicht mehr
+    // in der Objekttabelle existiert, bleiben erhalten. Ausgeblendet werden nur
+    // Lose, die ausdrücklich den Status "completed" besitzen.
+    items = items.filter((it) => {
+      const objectName = String(it.objekt || "").trim();
+      return !objectName || !currentCompletedObjectNames.has(objectName);
+    });
 
     if (needsMachine) {
       const m = selectedMachine.trim();
