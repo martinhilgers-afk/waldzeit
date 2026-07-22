@@ -71,6 +71,28 @@ type DriverGroup = {
   rows: EnrichedRow[];
 };
 
+type CalendarDaySummary = {
+  date: string;
+  rows: number;
+  imports: number;
+  machines: number;
+  drivers: number;
+  hours: number;
+  open: number;
+  bad: number;
+  importNames: string[];
+};
+
+type ImportSummary = {
+  importName: string;
+  rows: number;
+  dates: string[];
+  machines: number;
+  drivers: number;
+  hours: number;
+  open: number;
+};
+
 function todayISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -79,6 +101,70 @@ function todayISO() {
 function firstOfMonthISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function monthKeyFromISO(dateISO: string) {
+  return String(dateISO || "").slice(0, 7);
+}
+
+function monthStartISO(monthKey: string) {
+  return `${monthKey}-01`;
+}
+
+function monthEndISO(monthKey: string) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(y, m, 0);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function shiftMonthKey(monthKey: string, delta: number) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabelDE(monthKey: string) {
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("de-DE", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function weekdayIndexMonday(dateISO: string) {
+  const [y, m, d] = dateISO.split("-").map(Number);
+  const jsDay = new Date(y, m - 1, d).getDay();
+  return jsDay === 0 ? 6 : jsDay - 1;
+}
+
+function calendarDatesForMonth(monthKey: string) {
+  const start = monthStartISO(monthKey);
+  const end = monthEndISO(monthKey);
+  const dates: string[] = [];
+
+  const startDate = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  const leading = weekdayIndexMonday(start);
+
+  for (let i = leading; i > 0; i--) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() - i);
+    dates.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  }
+
+  const cur = new Date(startDate);
+  while (cur <= endDate) {
+    dates.push(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`);
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  while (dates.length % 7 !== 0) {
+    const d = new Date(`${dates[dates.length - 1]}T00:00:00`);
+    d.setDate(d.getDate() + 1);
+    dates.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  }
+
+  return dates;
 }
 
 function fmtDE(dateISO: string) {
@@ -176,6 +262,10 @@ export default function KomatsuPage() {
   const [to, setTo] = useState(todayISO());
   const [onlyOpen, setOnlyOpen] = useState(true);
 
+  const [calendarMonth, setCalendarMonth] = useState(monthKeyFromISO(todayISO()));
+  const [calendarRows, setCalendarRows] = useState<KomatsuRow[]>([]);
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(todayISO());
+
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [objects, setObjects] = useState<Option[]>([]);
   const [machines, setMachines] = useState<Option[]>([]);
@@ -214,7 +304,7 @@ export default function KomatsuPage() {
 
     const [d, o, m] = await Promise.all([
       supabase.from("driver_profiles").select("user_id,full_name,username,is_active").eq("is_active", true).order("full_name"),
-      supabase.from("objects").select("id,name,is_active").eq("is_active", true).order("name"),
+      supabase.from("objects").select("id,name,status").neq("status", "completed").order("name"),
       supabase.from("machines").select("id,name,serial_number,is_active").eq("is_active", true).order("name"),
     ]);
 
@@ -228,8 +318,27 @@ export default function KomatsuPage() {
     setObjects((o.data as any[]) ?? []);
     setMachines((m.data as any[]) ?? []);
 
-    await loadRows();
+    await Promise.all([loadRows(), loadCalendarRows(calendarMonth)]);
     setBusy(false);
+  }
+
+  async function loadCalendarRows(monthKey = calendarMonth) {
+    const monthFrom = monthStartISO(monthKey);
+    const monthTo = monthEndISO(monthKey);
+
+    const { data, error } = await supabase
+      .from("komatsu_hours")
+      .select("*")
+      .gte("date", monthFrom)
+      .lte("date", monthTo)
+      .order("date", { ascending: true });
+
+    if (error) {
+      setMsg("Fehler Kalender laden: " + error.message);
+      return;
+    }
+
+    setCalendarRows((((data as any[]) ?? []) as KomatsuRow[]));
   }
 
   async function loadRows() {
@@ -525,12 +634,40 @@ export default function KomatsuPage() {
       if (error) throw new Error(error.message);
 
       setMsg(`✅ Import fertig: ${imported.length} Zeilen`);
-      await loadRows();
+      await Promise.all([loadRows(), loadCalendarRows(calendarMonth)]);
     } catch (e: any) {
       setMsg("Fehler Import: " + (e?.message || String(e)));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function deleteImport(importName: string) {
+    if (!importName) return;
+
+    const summary = importSummaries.find((x) => x.importName === importName);
+    const detail = summary
+      ? `\n\n${summary.rows} Zeilen · ${summary.dates.length} Tag(e) · ${format1(summary.hours)} h`
+      : "";
+
+    if (!confirm(`Import wirklich löschen?\n\n${importName}${detail}\n\nDiese Aktion kann nicht rückgängig gemacht werden.`)) {
+      return;
+    }
+
+    setBusy(true);
+    setMsg("Lösche Import...");
+
+    const { error } = await supabase.from("komatsu_hours").delete().eq("import_name", importName);
+
+    if (error) {
+      setMsg("Fehler Import löschen: " + error.message);
+      setBusy(false);
+      return;
+    }
+
+    setMsg("✅ Import gelöscht.");
+    await Promise.all([loadRows(), loadCalendarRows(calendarMonth)]);
+    setBusy(false);
   }
 
   const enriched = useMemo<EnrichedRow[]>(() => {
@@ -559,6 +696,142 @@ export default function KomatsuPage() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, exactWaldzeitMap, machineWaldzeitMap, drivers, machines]);
+
+  const calendarSummaryMap = useMemo(() => {
+    const map = new Map<string, CalendarDaySummary>();
+
+    for (const r of calendarRows) {
+      const date = r.date;
+      const current = map.get(date) ?? {
+        date,
+        rows: 0,
+        imports: 0,
+        machines: 0,
+        drivers: 0,
+        hours: 0,
+        open: 0,
+        bad: 0,
+        importNames: [],
+      };
+
+      const importSet = new Set(current.importNames);
+      const machineSet = new Set<string>();
+      const driverSet = new Set<string>();
+
+      for (const x of calendarRows.filter((z) => z.date === date)) {
+        const importName = norm(x.import_name);
+        if (importName) importSet.add(importName);
+
+        const machine = effectiveMachineName(x);
+        if (machine) machineSet.add(machine);
+
+        const driver = effectiveDriverName(x);
+        if (driver) driverSet.add(driver);
+      }
+
+      const hours = r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? 0;
+      current.rows += 1;
+      current.imports = importSet.size;
+      current.machines = machineSet.size;
+      current.drivers = driverSet.size;
+      current.hours = round1(current.hours + Number(hours || 0)) ?? 0;
+      if (!r.is_checked) current.open += 1;
+
+      const match = getWaldzeitMatch(r);
+      const wald = match.matchType === "none" ? null : match.hours;
+      const diff = hours !== null && wald !== null ? round1(wald - Number(hours || 0)) : null;
+      const hasMapping = !!effectiveDriverId(r) && !!effectiveMachineName(r);
+      const status = getStatus(diff, hasMapping, match.matchType);
+      if (status.cls === "bad") current.bad += 1;
+
+      current.importNames = Array.from(importSet).sort();
+      map.set(date, current);
+    }
+
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendarRows, drivers, machines, exactWaldzeitMap, machineWaldzeitMap]);
+
+  const calendarDates = useMemo(() => calendarDatesForMonth(calendarMonth), [calendarMonth]);
+
+  const selectedDaySummary = calendarSummaryMap.get(selectedCalendarDate) ?? null;
+
+  const dashboard = useMemo(() => {
+    const imports = new Set<string>();
+    const machinesSet = new Set<string>();
+    let hours = 0;
+    let open = 0;
+
+    for (const r of calendarRows) {
+      if (r.import_name) imports.add(r.import_name);
+      const machine = effectiveMachineName(r);
+      if (machine) machinesSet.add(machine);
+      hours += Number(r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? 0);
+      if (!r.is_checked) open += 1;
+    }
+
+    return {
+      imports: imports.size,
+      machines: machinesSet.size,
+      hours: round1(hours) ?? 0,
+      open,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendarRows, machines]);
+
+  const importSummaries = useMemo<ImportSummary[]>(() => {
+    const map = new Map<string, {
+      rows: number;
+      dates: Set<string>;
+      machines: Set<string>;
+      drivers: Set<string>;
+      hours: number;
+      open: number;
+    }>();
+
+    for (const r of calendarRows) {
+      const importName = norm(r.import_name) || "(ohne Dateiname)";
+      const current = map.get(importName) ?? {
+        rows: 0,
+        dates: new Set<string>(),
+        machines: new Set<string>(),
+        drivers: new Set<string>(),
+        hours: 0,
+        open: 0,
+      };
+
+      current.rows += 1;
+      current.dates.add(r.date);
+
+      const machine = effectiveMachineName(r);
+      if (machine) current.machines.add(machine);
+
+      const driver = effectiveDriverName(r);
+      if (driver) current.drivers.add(driver);
+
+      current.hours += Number(r.motor_runtime_h ?? r.effective_work_h ?? r.motorstunden ?? 0);
+      if (!r.is_checked) current.open += 1;
+
+      map.set(importName, current);
+    }
+
+    return Array.from(map.entries())
+      .map(([importName, x]) => ({
+        importName,
+        rows: x.rows,
+        dates: Array.from(x.dates).sort(),
+        machines: x.machines.size,
+        drivers: x.drivers.size,
+        hours: round1(x.hours) ?? 0,
+        open: x.open,
+      }))
+      .sort((a, b) => {
+        const aDate = a.dates[a.dates.length - 1] || "";
+        const bDate = b.dates[b.dates.length - 1] || "";
+        return bDate.localeCompare(aDate) || a.importName.localeCompare(b.importName);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendarRows, drivers, machines]);
 
   const grouped = useMemo<DriverGroup[]>(() => {
     const map = new Map<string, DriverGroup>();
@@ -591,6 +864,12 @@ export default function KomatsuPage() {
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enriched, drivers]);
+
+  async function changeCalendarMonth(nextMonth: string) {
+    setCalendarMonth(nextMonth);
+    setSelectedCalendarDate(monthStartISO(nextMonth));
+    await loadCalendarRows(nextMonth);
+  }
 
   async function markDriverGroupChecked(group: DriverGroup) {
     const ids = group.rows.map((x) => x.r.id);
@@ -678,12 +957,144 @@ export default function KomatsuPage() {
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) importExcel(f);
+                e.currentTarget.value = "";
               }}
             />
           </label>
         </div>
 
         {msg && <pre className="msg">{msg}</pre>}
+      </section>
+
+      <section className="dashboardGrid">
+        <div className="metricCard">
+          <span>Imports</span>
+          <b>{dashboard.imports}</b>
+        </div>
+        <div className="metricCard">
+          <span>Maschinen</span>
+          <b>{dashboard.machines}</b>
+        </div>
+        <div className="metricCard">
+          <span>Komatsu-Stunden</span>
+          <b>{format1(dashboard.hours)} h</b>
+        </div>
+        <div className="metricCard">
+          <span>Offene Zeilen</span>
+          <b>{dashboard.open}</b>
+        </div>
+      </section>
+
+      <section className="card calendarCard">
+        <div className="calendarHead">
+          <div>
+            <h2>Import-Kalender</h2>
+            <div className="smallMuted">Grün = Import vorhanden · Gelb = mehrere Imports oder offene Zeilen · Rot = Fehler im Abgleich</div>
+          </div>
+
+          <div className="calendarNav">
+            <button type="button" className="btn" onClick={() => changeCalendarMonth(shiftMonthKey(calendarMonth, -1))}>←</button>
+            <button type="button" className="btn monthBtn" onClick={() => changeCalendarMonth(monthKeyFromISO(todayISO()))}>
+              {monthLabelDE(calendarMonth)}
+            </button>
+            <button type="button" className="btn" onClick={() => changeCalendarMonth(shiftMonthKey(calendarMonth, 1))}>→</button>
+          </div>
+        </div>
+
+        <div className="weekdayGrid">
+          {["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"].map((x) => <div key={x}>{x}</div>)}
+        </div>
+
+        <div className="calendarGrid">
+          {calendarDates.map((date) => {
+            const summary = calendarSummaryMap.get(date);
+            const inMonth = monthKeyFromISO(date) === calendarMonth;
+            const selected = selectedCalendarDate === date;
+            const tone = !summary ? "empty" : summary.bad > 0 ? "bad" : summary.imports > 1 || summary.open > 0 ? "warn" : "ok";
+
+            return (
+              <button
+                key={date}
+                type="button"
+                className={`calendarDay ${tone} ${inMonth ? "" : "outside"} ${selected ? "selected" : ""}`}
+                onClick={() => setSelectedCalendarDate(date)}
+                title={
+                  summary
+                    ? `${fmtDE(date)} · ${summary.rows} Zeilen · ${summary.imports} Import(s) · ${format1(summary.hours)} h · ${summary.open} offen`
+                    : `${fmtDE(date)} · kein Import`
+                }
+              >
+                <span className="dayNumber">{Number(date.slice(-2))}</span>
+                {summary && (
+                  <span className="dayMeta">
+                    <b>{summary.rows} Z.</b>
+                    <span>{format1(summary.hours)} h</span>
+                    {summary.imports > 1 && <span>{summary.imports} Imports</span>}
+                    {summary.open > 0 && <span>{summary.open} offen</span>}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="selectedDayPanel">
+          <div>
+            <h3>{fmtDE(selectedCalendarDate)}</h3>
+            {selectedDaySummary ? (
+              <div className="selectedStats">
+                <span>{selectedDaySummary.rows} Zeilen</span>
+                <span>{selectedDaySummary.imports} Import(s)</span>
+                <span>{selectedDaySummary.machines} Maschinen</span>
+                <span>{selectedDaySummary.drivers} Fahrer</span>
+                <span>{format1(selectedDaySummary.hours)} h</span>
+                <span>{selectedDaySummary.open} offen</span>
+              </div>
+            ) : (
+              <div className="smallMuted">An diesem Tag wurde kein Import gefunden.</div>
+            )}
+          </div>
+
+          {selectedDaySummary && (
+            <div className="selectedImports">
+              {selectedDaySummary.importNames.map((name) => (
+                <div key={name} className="importChip">{name}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="card importHistoryCard">
+        <div className="historyHead">
+          <div>
+            <h2>Importhistorie</h2>
+            <div className="smallMuted">Alle Imports des ausgewählten Monats</div>
+          </div>
+          <button type="button" className="btn" onClick={() => loadCalendarRows(calendarMonth)} disabled={busy}>Neu laden</button>
+        </div>
+
+        <div className="historyList">
+          {importSummaries.map((x) => (
+            <div key={x.importName} className="historyRow">
+              <div>
+                <b>{x.importName}</b>
+                <div className="historyMeta">
+                  {x.rows} Zeilen · {x.dates.length} Tag(e) · {x.machines} Maschinen · {x.drivers} Fahrer · {format1(x.hours)} h · {x.open} offen
+                </div>
+                <div className="historyDates">{x.dates.map(fmtDE).join(", ")}</div>
+              </div>
+
+              {x.importName !== "(ohne Dateiname)" && (
+                <button type="button" className="dangerBtn" onClick={() => deleteImport(x.importName)} disabled={busy}>
+                  Import löschen
+                </button>
+              )}
+            </div>
+          ))}
+
+          {importSummaries.length === 0 && <div className="smallMuted">Keine Imports in diesem Monat.</div>}
+        </div>
       </section>
 
       <section className="groups">
@@ -949,6 +1360,206 @@ export default function KomatsuPage() {
           margin: 8px 0 0 0;
         }
 
+        .dashboardGrid {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .metricCard {
+          border: 1px solid #eee;
+          border-radius: 14px;
+          padding: 12px;
+          background: #fff;
+          display: grid;
+          gap: 4px;
+        }
+
+        .metricCard span {
+          font-size: 12px;
+          font-weight: 800;
+          opacity: 0.72;
+        }
+
+        .metricCard b {
+          font-size: 24px;
+        }
+
+        .calendarCard,
+        .importHistoryCard {
+          margin-top: 10px;
+        }
+
+        .calendarHead,
+        .historyHead {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: flex-start;
+        }
+
+        .calendarHead h2,
+        .historyHead h2,
+        .selectedDayPanel h3 {
+          margin: 0;
+        }
+
+        .calendarNav {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+        }
+
+        .monthBtn {
+          min-width: 170px;
+        }
+
+        .smallMuted {
+          font-size: 12px;
+          opacity: 0.68;
+          font-weight: 700;
+          margin-top: 3px;
+        }
+
+        .weekdayGrid,
+        .calendarGrid {
+          display: grid;
+          grid-template-columns: repeat(7, 1fr);
+          gap: 5px;
+        }
+
+        .weekdayGrid {
+          margin-top: 10px;
+        }
+
+        .weekdayGrid > div {
+          text-align: center;
+          font-size: 11px;
+          font-weight: 900;
+          opacity: 0.65;
+          padding: 4px;
+        }
+
+        .calendarDay {
+          min-height: 94px;
+          border: 1px solid #e5e5e5;
+          border-radius: 11px;
+          background: #fafafa;
+          padding: 7px;
+          cursor: pointer;
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          text-align: left;
+          gap: 5px;
+        }
+
+        .calendarDay.empty {
+          background: #fafafa;
+        }
+
+        .calendarDay.ok {
+          background: #e9f8ed;
+          border-color: #75c58a;
+        }
+
+        .calendarDay.warn {
+          background: #fff4c7;
+          border-color: #d6aa22;
+        }
+
+        .calendarDay.bad {
+          background: #ffe1e1;
+          border-color: #df6d6d;
+        }
+
+        .calendarDay.outside {
+          opacity: 0.35;
+        }
+
+        .calendarDay.selected {
+          box-shadow: inset 0 0 0 2px #222;
+        }
+
+        .dayNumber {
+          font-weight: 900;
+          font-size: 13px;
+        }
+
+        .dayMeta {
+          display: grid;
+          gap: 2px;
+          font-size: 10px;
+          line-height: 1.2;
+        }
+
+        .selectedDayPanel {
+          margin-top: 8px;
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 10px;
+          background: #fafafa;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+
+        .selectedStats,
+        .selectedImports {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          margin-top: 6px;
+        }
+
+        .selectedStats span,
+        .importChip {
+          border: 1px solid #ddd;
+          border-radius: 999px;
+          padding: 3px 8px;
+          background: #fff;
+          font-size: 11px;
+          font-weight: 800;
+        }
+
+        .historyList {
+          display: grid;
+          gap: 7px;
+          margin-top: 10px;
+        }
+
+        .historyRow {
+          border: 1px solid #eee;
+          border-radius: 11px;
+          padding: 9px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+
+        .historyMeta,
+        .historyDates {
+          font-size: 11px;
+          opacity: 0.72;
+          margin-top: 3px;
+          font-weight: 700;
+        }
+
+        .dangerBtn {
+          border: 1px solid #d36b6b;
+          background: #fff1f1;
+          color: #8a0000;
+          font-weight: 900;
+          border-radius: 10px;
+          padding: 8px 10px;
+          cursor: pointer;
+        }
+
         .groups {
           display: grid;
           gap: 8px;
@@ -1083,6 +1694,14 @@ export default function KomatsuPage() {
             flex-direction: column;
           }
 
+          .dashboardGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .calendarDay {
+            min-height: 82px;
+          }
+
           .filterGrid {
             grid-template-columns: 1fr 1fr;
           }
@@ -1110,6 +1729,42 @@ export default function KomatsuPage() {
           .wrap {
             margin: 8px auto;
             padding: 6px;
+          }
+
+          .dashboardGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .calendarHead,
+          .historyHead {
+            flex-direction: column;
+          }
+
+          .calendarNav {
+            width: 100%;
+          }
+
+          .monthBtn {
+            flex: 1;
+            min-width: 0;
+          }
+
+          .weekdayGrid,
+          .calendarGrid {
+            gap: 3px;
+          }
+
+          .calendarDay {
+            min-height: 64px;
+            padding: 5px;
+          }
+
+          .dayMeta {
+            font-size: 9px;
+          }
+
+          .dayMeta span:nth-child(n+3) {
+            display: none;
           }
 
           .h1 {

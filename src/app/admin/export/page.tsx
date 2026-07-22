@@ -1018,22 +1018,38 @@ export default function AdminExportPage() {
 
     let items: ItemRow[] = [];
 
-    if (dayIds.length > 0) {
-      const { data: itemData, error: itemErr } = await supabase
-        .from("work_items")
-        .select(
-          "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
-        )
-        .in("workday_id", dayIds);
+if (dayIds.length > 0) {
+  const chunkSize = 150;
 
-      if (itemErr) {
-        setLoading(false);
-        setMsg("Fehler Work Items: " + itemErr.message);
-        return;
-      }
+  for (let i = 0; i < dayIds.length; i += chunkSize) {
+    const idChunk = dayIds.slice(i, i + chunkSize);
 
-      items = ((itemData as any[]) ?? []) as ItemRow[];
+    const { data: itemData, error: itemErr } = await supabase
+      .from("work_items")
+      .select(
+        "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
+      )
+      .in("workday_id", idChunk);
+
+    if (itemErr) {
+      setLoading(false);
+      setMsg(
+        [
+          "Fehler Work Items:",
+          `Block ${Math.floor(i / chunkSize) + 1}`,
+          `Workdays im Block: ${idChunk.length}`,
+          `Code: ${itemErr.code || "-"}`,
+          `Meldung: ${itemErr.message || "-"}`,
+          `Details: ${itemErr.details || "-"}`,
+          `Hinweis: ${itemErr.hint || "-"}`,
+        ].join("\n")
+      );
+      return;
     }
+
+    items.push(...((((itemData as any[]) ?? []) as ItemRow[])));
+  }
+}
 
     // Zentrale Exportregel:
     // - active: sichtbar
