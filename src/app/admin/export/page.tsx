@@ -1019,7 +1019,7 @@ export default function AdminExportPage() {
     let items: ItemRow[] = [];
 
 if (dayIds.length > 0) {
-  const chunkSize = 150;
+  const chunkSize = 30;
 
   for (let i = 0; i < dayIds.length; i += chunkSize) {
     const idChunk = dayIds.slice(i, i + chunkSize);
