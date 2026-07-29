@@ -218,7 +218,11 @@ function toNumOrNull(v: string) {
 }
 
 function norm(s: any) {
-  return String(s ?? "").trim();
+  return String(s ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function keyPart(s: any) {
@@ -267,13 +271,44 @@ function komatsuHours(k: KomatsuRow) {
 }
 
 function komatsuEffectiveDriverId(k: KomatsuRow, drivers: DriverRow[]) {
-  if (k.corrected_driver_id) return k.corrected_driver_id;
-  const raw = keyPart(k.driver_name);
-  if (!raw) return "";
-  const exact = drivers.find((d) => keyPart(driverLabel(d)) === raw);
+  const correctedId = norm(k.corrected_driver_id);
+  if (correctedId) {
+    const correctedDriver = drivers.find((d) => norm(d.user_id) === correctedId);
+    if (correctedDriver) return correctedDriver.user_id;
+  }
+
+  const searchedName = keyPart(k.driver_name);
+  if (!searchedName) return "";
+
+  const exact = drivers.find((driver) => {
+    const fullName = keyPart(driver.full_name);
+    const username = keyPart(driver.username);
+    const label = keyPart(driverLabel(driver));
+
+    return (
+      fullName === searchedName ||
+      username === searchedName ||
+      label === searchedName
+    );
+  });
+
   if (exact) return exact.user_id;
-  const contains = drivers.find((d) => keyPart(driverLabel(d)).includes(raw) || raw.includes(keyPart(driverLabel(d))));
-  return contains?.user_id ?? "";
+
+  const fuzzy = drivers.find((driver) => {
+    const candidates = [
+      keyPart(driver.full_name),
+      keyPart(driver.username),
+      keyPart(driverLabel(driver)),
+    ].filter(Boolean);
+
+    return candidates.some(
+      (candidate) =>
+        candidate.includes(searchedName) ||
+        searchedName.includes(candidate)
+    );
+  });
+
+  return fuzzy?.user_id ?? "";
 }
 
 function komatsuEffectiveMachine(k: KomatsuRow, machines: OptionRow[]) {
@@ -520,8 +555,32 @@ export default function AdminControlPage() {
       return true;
     });
 
+    // Bereits importierte Komatsu-Zeilen ohne korrigierte Fahrer-ID auch
+    // auf der Kontrollseite automatisch erkennen und dauerhaft reparieren.
+    const repairedKomatsu = await Promise.all(
+      rawKomatsu.map(async (k) => {
+        const driverId = komatsuEffectiveDriverId(k, driverRows);
+
+        if (!driverId || norm(k.corrected_driver_id) === driverId) {
+          return k;
+        }
+
+        const { error: repairError } = await supabase
+          .from("komatsu_hours")
+          .update({ corrected_driver_id: driverId })
+          .eq("id", k.id);
+
+        if (repairError) return k;
+
+        return {
+          ...k,
+          corrected_driver_id: driverId,
+        };
+      })
+    );
+
     const nextKomatsuEdits: Record<string, { driverId: string; machine: string; objekt: string; hours: string }> = {};
-    for (const k of rawKomatsu) {
+    for (const k of repairedKomatsu) {
       nextKomatsuEdits[k.id] = {
         driverId: komatsuEffectiveDriverId(k, driverRows),
         machine: komatsuEffectiveMachine(k, machineRows),
@@ -531,7 +590,7 @@ export default function AdminControlPage() {
     }
 
     setDays(finalDays);
-    setKomatsuRows(rawKomatsu);
+    setKomatsuRows(repairedKomatsu);
     setEdits(nextEdits);
     setItemTextEdits(nextTextEdits);
     setCommentEdits(nextComments);
@@ -1197,17 +1256,26 @@ export default function AdminControlPage() {
                             <summary className="daySummary">
                               <div className="dayMain">
                                 <b>{weekdayDE(d.date)} {fmtDE(d.date)}</b>
-                                <span className="miniStats">AZ {format1(arbeitszeit)}h · Wald {format1(geleistet)}h · MAS {format1(masTotal)}h · Komatsu {format1(kTotal)}h · Diff K {format1(diffKomatsu)}h</span>
+                                {!d.is_controlled && (
+                                  <span className="miniStats">
+                                    AZ {format1(arbeitszeit)}h · Wald {format1(geleistet)}h · MAS {format1(masTotal)}h · Komatsu {format1(kTotal)}h · Diff K {format1(diffKomatsu)}h
+                                  </span>
+                                )}
                               </div>
 
                               <div className="badges">
-                                {flags.is_urlaub && <span className="badge green">Urlaub</span>}
-                                {flags.is_wetter && <span className="badge blue">Wetter</span>}
-                                {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
-                                {display.komatsu.length > 0 && <span className="badge komatsu">K {display.komatsu.length}</span>}
-                                {display.komatsu.length === 0 && display.machineKomatsu.length > 0 && <span className="badge warn">K anderer Fahrer {display.machineKomatsu.length}</span>}
-                                <span className={`badge ${issueBadgeClass(dayIssues)}`}>{issueText(dayIssues)}</span>
-                                {d.is_controlled && <span className="badge done">kontrolliert</span>}
+                                {d.is_controlled ? (
+                                  <span className="badge done">kontrolliert</span>
+                                ) : (
+                                  <>
+                                    {flags.is_urlaub && <span className="badge green">Urlaub</span>}
+                                    {flags.is_wetter && <span className="badge blue">Wetter</span>}
+                                    {flags.is_feiertag && <span className="badge holiday">Feiertag</span>}
+                                    {display.komatsu.length > 0 && <span className="badge komatsu">K {display.komatsu.length}</span>}
+                                    {display.komatsu.length === 0 && display.machineKomatsu.length > 0 && <span className="badge warn">K anderer Fahrer {display.machineKomatsu.length}</span>}
+                                    <span className={`badge ${issueBadgeClass(dayIssues)}`}>{issueText(dayIssues)}</span>
+                                  </>
+                                )}
                               </div>
                             </summary>
 
@@ -1378,7 +1446,7 @@ const baseStyles = `
 .filterGrid{display:grid;grid-template-columns:1fr 1fr 1.3fr auto auto;gap:8px;align-items:end}.field{display:block;font-size:13px;font-weight:800}.control{width:100%;padding:9px;font-size:15px;margin-top:4px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;box-sizing:border-box}
 .checkBox{display:flex;gap:8px;align-items:center;border:1px solid #eee;border-radius:10px;padding:9px;font-weight:800;background:#fff;font-size:14px}.msg{margin-top:8px;white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px;font-size:13px}.bad{color:crimson;font-weight:800}
 .weeks{display:grid;gap:10px;margin-top:10px}.weekSummary,.daySummary,.driverSummary{cursor:pointer;display:flex;align-items:center;gap:8px;font-weight:900;list-style:none;user-select:none}.weekSummary::-webkit-details-marker,.daySummary::-webkit-details-marker,.driverSummary::-webkit-details-marker{display:none}.plus{display:inline-block;transition:transform .12s ease;font-size:19px}details[open]>.weekSummary .plus,details[open]>.daySummary .plus,details[open]>.driverSummary .plus{transform:rotate(45deg)}
-.drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:7px}.dayCard.okDay{background:#e6f7e9;border-color:#54c26e}.dayCard.warnDay{background:#fff1b8;border-color:#e0a800}.dayCard.badDay{background:#ffe1e1;border-color:#e05a5a}.dayCard.controlled{background:#dff4e5;border-color:#3fb95f}
+.drivers,.days{display:grid;gap:8px;margin-top:8px}.driverCard{background:#fcfcfc;padding:9px}.driverMeta{margin-left:auto;font-size:12px;opacity:.7}.weekActions{margin-top:8px;display:flex;justify-content:flex-end}.dayCard{padding:7px}.dayCard.okDay{background:#e6f7e9;border-color:#54c26e}.dayCard.warnDay{background:#fff1b8;border-color:#e0a800}.dayCard.badDay{background:#ffe1e1;border-color:#e05a5a}.dayCard.controlled{background:#fff;border-color:#e5e5e5}.dayCard.controlled>summary~*{display:none}
 .missingDay{border:1px dashed #ddd;border-radius:12px;padding:8px;background:#fafafa;display:flex;justify-content:space-between;gap:8px;opacity:.92;font-size:14px}.missingActions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:flex-start}.btnStatus{border:1px solid #ddd;background:#fff;font-weight:900;cursor:pointer;padding:8px 10px;border-radius:10px}.weatherBtn{background:#cbe4ff;border-color:#559cdf}.holidayBtn{background:#b9efc7;border-color:#38b65a}.feastBtn{background:#ffe082;border-color:#e0a800}.missingDay.hasKomatsu{border-color:#f1d37a;background:#fffdf5}.daySummary{justify-content:space-between}.dayMain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.miniStats{font-size:12px;opacity:.7;font-weight:800}.badges{display:flex;gap:5px;flex-wrap:wrap}.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.green{background:#b9efc7;border:1px solid #38b65a}.badge.blue{background:#cbe4ff;border:1px solid #559cdf}.badge.holiday{background:#ffe082;border:1px solid #e0a800}.badge.done{background:#b9efc7;border:1px solid #38b65a}.badge.okStatus{background:#7ee49a;border:1px solid #1d9b3f;color:#063d14}.badge.warnStatus{background:#ffd43b;border:1px solid #b88700;color:#5a3b00}.badge.badStatus{background:#ff8b8b;border:1px solid #d0003b;color:#6b001d}.badge.komatsu{background:#dedede;border:1px solid #aaa}.badge.warn{background:#ffe082;border:1px solid #e0a800}
 .dayControlPanel{display:grid;gap:6px;margin-top:6px}.compareBox{display:grid;grid-template-columns:.95fr repeat(6,.8fr);gap:5px;border:1px solid #ddd;border-radius:10px;padding:6px;background:rgba(255,255,255,.78);font-size:12px}.compareBox>div,.compareBox>.dateField{display:grid;gap:1px;align-content:start;min-width:0}.compareBox b{font-size:11px}.compareBox span{font-size:13px;font-weight:900}.compareBox small{font-size:10px;opacity:.68}.compareBox input{width:100%;padding:6px;border:1px solid #ccc;border-radius:8px;font-size:12px}.diffWarn{color:#d0003b;font-weight:900}.diffOk{color:#087c24;font-weight:900}.small{font-size:11px;opacity:.72}
 .issueReasons{display:grid;gap:4px;margin-top:6px}.issueBad,.issueWarn{border-radius:8px;padding:5px 8px;font-size:12px;font-weight:900}.issueBad{background:#ffb3b3;border:1px solid #d0003b;color:#6b001d}.issueWarn{background:#ffe58a;border:1px solid #b88700;color:#5a3b00}.flagsCommentGrid{display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:stretch}.flagsRow{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}.flagBox{display:flex;gap:5px;align-items:center;border:1px solid #ddd;border-radius:9px;padding:6px 8px;background:rgba(255,255,255,.85);font-weight:900;font-size:12px}.commentEdit{display:block;font-weight:800;font-size:12px}.commentEdit textarea{width:100%;min-height:34px;margin-top:3px;padding:7px;border:1px solid #ccc;border-radius:9px;font-size:13px;box-sizing:border-box}
