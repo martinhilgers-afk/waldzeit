@@ -222,7 +222,11 @@ function labelDriver(d: Driver) {
 }
 
 function norm(s: any) {
-  return String(s ?? "").trim();
+  return String(s ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function keyPart(s: any) {
@@ -314,11 +318,17 @@ export default function KomatsuPage() {
       return;
     }
 
-    setDrivers((d.data as any[]) ?? []);
-    setObjects((o.data as any[]) ?? []);
-    setMachines((m.data as any[]) ?? []);
+    const driverData = (((d.data as any[]) ?? []) as Driver[]);
+    const objectData = (((o.data as any[]) ?? []) as Option[]);
+    const machineData = (((m.data as any[]) ?? []) as Option[]);
 
-    await Promise.all([loadRows(), loadCalendarRows(calendarMonth)]);
+    setDrivers(driverData);
+    setObjects(objectData);
+    setMachines(machineData);
+
+    // React-State wird asynchron gesetzt. Deshalb verwenden wir beim ersten
+    // Laden direkt die frisch geladenen Fahrer für die automatische Zuordnung.
+    await Promise.all([loadRows(driverData), loadCalendarRows(calendarMonth)]);
     setBusy(false);
   }
 
@@ -341,7 +351,7 @@ export default function KomatsuPage() {
     setCalendarRows((((data as any[]) ?? []) as KomatsuRow[]));
   }
 
-  async function loadRows() {
+  async function loadRows(driverList: Driver[] = drivers) {
     setBusy(true);
 
     let q = supabase
@@ -362,7 +372,31 @@ export default function KomatsuPage() {
     }
 
     const r = ((data as any[]) ?? []) as KomatsuRow[];
-    setRows(r);
+
+    // Bereits importierte Zeilen ohne korrigierte Fahrer-ID automatisch
+    // nachträglich zuordnen und dauerhaft in komatsu_hours speichern.
+    const repairedRows = await Promise.all(
+      r.map(async (row) => {
+        if (row.corrected_driver_id) return row;
+
+        const driverId = autoDriverFromList(row.driver_name, driverList);
+        if (!driverId) return row;
+
+        const { error: repairError } = await supabase
+          .from("komatsu_hours")
+          .update({ corrected_driver_id: driverId })
+          .eq("id", row.id);
+
+        if (repairError) return row;
+
+        return {
+          ...row,
+          corrected_driver_id: driverId,
+        };
+      })
+    );
+
+    setRows(repairedRows);
 
     await buildWaldzeitMaps();
 
@@ -440,19 +474,43 @@ export default function KomatsuPage() {
     return machines.find((m) => norm(m.serial_number) === norm(serial)) ?? null;
   }
 
-  function autoDriver(driverName: string | null) {
-    const n = norm(driverName).toLowerCase();
-    if (!n) return "";
+  function autoDriverFromList(driverName: string | null, driverList: Driver[]) {
+    const searchedName = norm(driverName).toLocaleLowerCase("de");
+    if (!searchedName) return "";
 
-    const exact = drivers.find((d) => labelDriver(d).toLowerCase() === n);
-    if (exact) return exact.user_id;
+    const exact = driverList.find((driver) => {
+      const fullName = norm(driver.full_name).toLocaleLowerCase("de");
+      const username = norm(driver.username).toLocaleLowerCase("de");
+      const label = norm(labelDriver(driver)).toLocaleLowerCase("de");
 
-    const contains = drivers.find((d) => {
-      const label = labelDriver(d).toLowerCase();
-      return label.includes(n) || n.includes(label);
+      return (
+        fullName === searchedName ||
+        username === searchedName ||
+        label === searchedName
+      );
     });
 
-    return contains?.user_id ?? "";
+    if (exact) return exact.user_id;
+
+    const fuzzy = driverList.find((driver) => {
+      const candidates = [
+        norm(driver.full_name).toLocaleLowerCase("de"),
+        norm(driver.username).toLocaleLowerCase("de"),
+        norm(labelDriver(driver)).toLocaleLowerCase("de"),
+      ].filter(Boolean);
+
+      return candidates.some(
+        (candidate) =>
+          candidate.includes(searchedName) ||
+          searchedName.includes(candidate)
+      );
+    });
+
+    return fuzzy?.user_id ?? "";
+  }
+
+  function autoDriver(driverName: string | null) {
+    return autoDriverFromList(driverName, drivers);
   }
 
   function effectiveMachineName(r: KomatsuRow) {
@@ -945,7 +1003,7 @@ export default function KomatsuPage() {
             Nur offen
           </label>
 
-          <button onClick={loadRows} disabled={busy} className="btnPrimary">
+          <button onClick={() => loadRows()} disabled={busy} className="btnPrimary">
             {busy ? "Lade..." : "Aktualisieren"}
           </button>
 
