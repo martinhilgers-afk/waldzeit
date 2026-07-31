@@ -205,13 +205,29 @@ export default function NewWorkday() {
     const dm = defaultMachine.trim();
     if (!dm) return;
 
+    const firstItemKey = items[0]?.key;
+    if (!firstItemKey) return;
+
     setItems((prev) =>
       prev.map((it, idx) => {
         if (idx !== 0) return it;
         if (it.maschine.trim()) return it;
-        return { ...it, maschine: dm };
+
+        return {
+          ...it,
+          maschine: dm,
+          warnung: "",
+          last_mas_end: null,
+          mas_start: "",
+          mas_end: "",
+          maschinenstunden_h: "",
+          twinch_h: "",
+        };
       })
     );
+
+    void suggestMasStart(dm, firstItemKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultMachine]);
 
   useEffect(() => {
@@ -340,7 +356,14 @@ export default function NewWorkday() {
       .limit(1);
 
     if (error || !data || data.length === 0) {
-      updateItem(itemKey, { last_mas_end: null });
+      updateItem(itemKey, {
+        last_mas_end: null,
+        mas_start: "",
+        mas_end: "",
+        maschinenstunden_h: "",
+        twinch_h: "",
+        warnung: "",
+      });
       return;
     }
 
@@ -348,7 +371,14 @@ export default function NewWorkday() {
     const lastEndNum = typeof lastEnd === "number" ? lastEnd : Number(lastEnd);
 
     if (!Number.isFinite(lastEndNum)) {
-      updateItem(itemKey, { last_mas_end: null });
+      updateItem(itemKey, {
+        last_mas_end: null,
+        mas_start: "",
+        mas_end: "",
+        maschinenstunden_h: "",
+        twinch_h: "",
+        warnung: "",
+      });
       return;
     }
 
@@ -356,10 +386,15 @@ export default function NewWorkday() {
       prev.map((it) => {
         if (it.key !== itemKey) return it;
 
-        const base = { ...it, last_mas_end: lastEndNum };
-        if (it.mas_start.trim()) return base;
-
-        return { ...base, mas_start: String(lastEndNum) };
+        return {
+          ...it,
+          last_mas_end: lastEndNum,
+          mas_start: String(lastEndNum).replace(".", ","),
+          mas_end: "",
+          maschinenstunden_h: "",
+          twinch_h: "",
+          warnung: "",
+        };
       })
     );
   }
@@ -575,7 +610,7 @@ export default function NewWorkday() {
         adblue_l: toNumOrNull(it.adblue_l),
         kommentar: it.kommentar.trim() || null,
         twinch_used: !!it.twinch_used,
-        twinch_h: it.twinch_used ? toNumOrNull(it.twinch_h) : null,
+        twinch_h: it.twinch_used && delta !== null && Number.isFinite(delta) ? delta : null,
       };
     });
 
@@ -765,7 +800,16 @@ export default function NewWorkday() {
                             return;
                           }
 
-                          updateItem(it.key, { maschine: v, warnung: "", last_mas_end: null });
+                          updateItem(it.key, {
+                            maschine: v,
+                            warnung: "",
+                            last_mas_end: null,
+                            mas_start: "",
+                            mas_end: "",
+                            maschinenstunden_h: "",
+                            twinch_h: "",
+                          });
+
                           if (v) await suggestMasStart(v, it.key);
                         }}
                         className="control"
@@ -801,12 +845,12 @@ export default function NewWorkday() {
                               const v = e.target.value;
                               const next = { ...it, mas_start: v };
                               const delta = calcMasHours(next);
-                              const maybeTwinch = it.twinch_used && !it.twinch_h.trim() ? (delta === null ? "" : String(delta).replace(".", ",")) : it.twinch_h;
+                              const deltaText = delta === null ? "" : String(delta).replace(".", ",");
 
                               updateItem(it.key, {
                                 mas_start: v,
-                                maschinenstunden_h: delta === null ? "" : String(delta).replace(".", ","),
-                                twinch_h: maybeTwinch,
+                                maschinenstunden_h: deltaText,
+                                twinch_h: it.twinch_used ? deltaText : it.twinch_h,
                               });
 
                               checkMachineHoursForDay(it.key, next);
@@ -825,12 +869,12 @@ export default function NewWorkday() {
                               const v = e.target.value;
                               const next = { ...it, mas_end: v };
                               const delta = calcMasHours(next);
-                              const maybeTwinch = it.twinch_used && !it.twinch_h.trim() ? (delta === null ? "" : String(delta).replace(".", ",")) : it.twinch_h;
+                              const deltaText = delta === null ? "" : String(delta).replace(".", ",");
 
                               updateItem(it.key, {
                                 mas_end: v,
-                                maschinenstunden_h: delta === null ? "" : String(delta).replace(".", ","),
-                                twinch_h: maybeTwinch,
+                                maschinenstunden_h: deltaText,
+                                twinch_h: it.twinch_used ? deltaText : it.twinch_h,
                               });
 
                               checkMachineHoursForDay(it.key, next);
@@ -917,8 +961,10 @@ export default function NewWorkday() {
                               checked={it.twinch_used}
                               onChange={(e) => {
                                 const v = e.target.checked;
-                                const nextTwinch = v && !it.twinch_h.trim() ? it.maschinenstunden_h : it.twinch_h;
-                                updateItem(it.key, { twinch_used: v, twinch_h: nextTwinch });
+                                updateItem(it.key, {
+                                  twinch_used: v,
+                                  twinch_h: v ? it.maschinenstunden_h : "",
+                                });
                               }}
                             />
                             Twinch genutzt
@@ -926,7 +972,14 @@ export default function NewWorkday() {
 
                           <label className="field">
                             Twinch Stunden (h)
-                            <input value={it.twinch_h} disabled={!it.twinch_used} onChange={(e) => updateItem(it.key, { twinch_h: e.target.value })} inputMode="decimal" placeholder="z.B. 1,5" className={`control ${!it.twinch_used ? "ro" : ""}`} />
+                            <input
+                              value={it.twinch_h}
+                              disabled={!it.twinch_used}
+                              readOnly
+                              inputMode="decimal"
+                              placeholder="automatisch = MAS Stunden"
+                              className="control ro"
+                            />
                           </label>
                         </div>
 
