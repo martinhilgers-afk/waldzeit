@@ -610,7 +610,7 @@ export default function NewWorkday() {
         adblue_l: toNumOrNull(it.adblue_l),
         kommentar: it.kommentar.trim() || null,
         twinch_used: !!it.twinch_used,
-        twinch_h: it.twinch_used && delta !== null && Number.isFinite(delta) ? delta : null,
+        twinch_h: it.twinch_used ? toNumOrNull(it.twinch_h) : null,
       };
     });
 
@@ -975,10 +975,10 @@ export default function NewWorkday() {
                             <input
                               value={it.twinch_h}
                               disabled={!it.twinch_used}
-                              readOnly
+                              onChange={(e) => updateItem(it.key, { twinch_h: e.target.value })}
                               inputMode="decimal"
-                              placeholder="automatisch = MAS Stunden"
-                              className="control ro"
+                              placeholder="z.B. 1,5"
+                              className={`control ${!it.twinch_used ? "ro" : ""}`}
                             />
                           </label>
                         </div>
