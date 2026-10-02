@@ -65,9 +65,9 @@ type EnrichedRow = {
   match: WaldzeitMatch;
 };
 
-type DriverGroup = {
-  driverId: string;
-  driverName: string;
+type MachineGroup = {
+  machineKey: string;
+  machineName: string;
   rows: EnrichedRow[];
 };
 
@@ -98,8 +98,9 @@ function todayISO() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function firstOfMonthISO() {
-  const d = new Date();
+function firstOfPreviousMonthISO() {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
@@ -262,13 +263,13 @@ export default function KomatsuPage() {
   const [admin, setAdmin] = useState<boolean | null>(null);
   const [meName, setMeName] = useState("");
 
-  const [from, setFrom] = useState(firstOfMonthISO());
-  const [to, setTo] = useState(todayISO());
+  const [from, setFrom] = useState(firstOfPreviousMonthISO);
+  const [to, setTo] = useState(() => monthEndISO(monthKeyFromISO(from)));
   const [onlyOpen, setOnlyOpen] = useState(true);
 
-  const [calendarMonth, setCalendarMonth] = useState(monthKeyFromISO(todayISO()));
+  const [calendarMonth, setCalendarMonth] = useState(() => monthKeyFromISO(from));
   const [calendarRows, setCalendarRows] = useState<KomatsuRow[]>([]);
-  const [selectedCalendarDate, setSelectedCalendarDate] = useState(todayISO());
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(from);
 
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [objects, setObjects] = useState<Option[]>([]);
@@ -279,7 +280,7 @@ export default function KomatsuPage() {
   const [machineWaldzeitMap, setMachineWaldzeitMap] = useState<Map<string, WaldzeitMatch>>(new Map());
 
   const [waldzeitEdits, setWaldzeitEdits] = useState<Record<string, string>>({});
-  const [openDrivers, setOpenDrivers] = useState<Record<string, boolean>>({});
+  const [openMachines, setOpenMachines] = useState<Record<string, boolean>>({});
 
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -891,37 +892,40 @@ export default function KomatsuPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [calendarRows, drivers, machines]);
 
-  const grouped = useMemo<DriverGroup[]>(() => {
-    const map = new Map<string, DriverGroup>();
+  const grouped = useMemo<MachineGroup[]>(() => {
+    const map = new Map<string, MachineGroup>();
 
     for (const e of enriched) {
-      const driverId = effectiveDriverId(e.r) || `komatsu_${effectiveDriverName(e.r)}`;
-      const driverName = effectiveDriverName(e.r);
+      const machineName = effectiveMachineName(e.r);
+      const serial = norm(e.r.serial_number);
+      const machineKey = machineName
+        ? `machine_${keyPart(machineName)}`
+        : serial ? `serial_${keyPart(serial)}` : "unassigned";
 
-      const g = map.get(driverId) ?? {
-        driverId,
-        driverName,
+      const g = map.get(machineKey) ?? {
+        machineKey,
+        machineName: machineName || (serial ? `Seriennummer ${serial}` : "Ohne Maschine"),
         rows: [],
       };
 
       g.rows.push(e);
-      map.set(driverId, g);
+      map.set(machineKey, g);
     }
 
     const result = Array.from(map.values());
 
-    result.sort((a, b) => a.driverName.localeCompare(b.driverName, "de", { sensitivity: "base" }));
+    result.sort((a, b) => a.machineName.localeCompare(b.machineName, "de", { sensitivity: "base", numeric: true }));
 
     for (const g of result) {
       g.rows.sort((a, b) => {
         if (a.r.date !== b.r.date) return b.r.date.localeCompare(a.r.date);
-        return effectiveMachineName(a.r).localeCompare(effectiveMachineName(b.r), "de", { sensitivity: "base" });
+        return effectiveDriverName(a.r).localeCompare(effectiveDriverName(b.r), "de", { sensitivity: "base" });
       });
     }
 
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enriched, drivers]);
+  }, [enriched, drivers, machines]);
 
   async function changeCalendarMonth(nextMonth: string) {
     setCalendarMonth(nextMonth);
@@ -929,14 +933,14 @@ export default function KomatsuPage() {
     await loadCalendarRows(nextMonth);
   }
 
-  async function markDriverGroupChecked(group: DriverGroup) {
+  async function markMachineGroupChecked(group: MachineGroup) {
     const ids = group.rows.map((x) => x.r.id);
     if (ids.length === 0) return;
 
-    if (!confirm(`${group.driverName}: ${ids.length} Komatsu-Zeilen als geprüft markieren?`)) return;
+    if (!confirm(`${group.machineName}: ${ids.length} Komatsu-Zeilen als geprüft markieren?`)) return;
 
     setBusy(true);
-    setMsg("Markiere Fahrergruppe als geprüft...");
+    setMsg("Markiere Maschinengruppe als geprüft...");
 
     const { error } = await supabase.from("komatsu_hours").update({ is_checked: true }).in("id", ids);
 
@@ -946,7 +950,7 @@ export default function KomatsuPage() {
       return;
     }
 
-    setMsg("✅ Fahrergruppe geprüft.");
+    setMsg("✅ Maschinengruppe geprüft.");
     await loadRows();
     setBusy(false);
   }
@@ -1160,32 +1164,32 @@ export default function KomatsuPage() {
           const badCount = group.rows.filter((x) => x.statusClass === "bad").length;
           const warnCount = group.rows.filter((x) => x.statusClass === "warn").length;
           const okCount = group.rows.filter((x) => x.statusClass === "ok").length;
-          const open = openDrivers[group.driverId] ?? idx === 0;
+          const open = openMachines[group.machineKey] ?? idx === 0;
 
           return (
             <details
-              key={group.driverId}
-              className="driverGroup"
+              key={group.machineKey}
+              className="machineGroup"
               open={open}
               onToggle={(e) => {
                 const isOpen = (e.currentTarget as HTMLDetailsElement).open;
-                setOpenDrivers((prev) => ({
+                setOpenMachines((prev) => ({
                   ...prev,
-                  [group.driverId]: isOpen,
+                  [group.machineKey]: isOpen,
                 }));
               }}
             >
-              <summary className="driverSummary">
+              <summary className="machineSummary">
                 <span className="plus">＋</span>
-                <b>{group.driverName}</b>
+                <b>{group.machineName}</b>
                 <span className="summaryMeta">
                   {group.rows.length} Zeilen · ✅ {okCount} · ⚠️ {warnCount} · 🔴 {badCount}
                 </span>
               </summary>
 
               <div className="groupActions">
-                <button type="button" onClick={() => markDriverGroupChecked(group)} disabled={busy} className="btnPrimary">
-                  Fahrer geprüft
+                <button type="button" onClick={() => markMachineGroupChecked(group)} disabled={busy} className="btnPrimary">
+                  Maschine geprüft
                 </button>
               </div>
 
@@ -1339,7 +1343,7 @@ export default function KomatsuPage() {
         }
 
         .card,
-        .driverGroup,
+        .machineGroup,
         .row {
           border: 1px solid #eee;
           border-radius: 14px;
@@ -1624,11 +1628,11 @@ export default function KomatsuPage() {
           margin-top: 10px;
         }
 
-        .driverGroup {
+        .machineGroup {
           padding: 8px;
         }
 
-        .driverSummary {
+        .machineSummary {
           cursor: pointer;
           display: flex;
           align-items: center;
@@ -1638,7 +1642,7 @@ export default function KomatsuPage() {
           font-size: 17px;
         }
 
-        .driverSummary::-webkit-details-marker {
+        .machineSummary::-webkit-details-marker {
           display: none;
         }
 
@@ -1648,7 +1652,7 @@ export default function KomatsuPage() {
           font-size: 19px;
         }
 
-        details[open] > .driverSummary .plus {
+        details[open] > .machineSummary .plus {
           transform: rotate(45deg);
         }
 
@@ -1778,7 +1782,7 @@ export default function KomatsuPage() {
             margin-left: 28px;
           }
 
-          .driverSummary {
+          .machineSummary {
             flex-wrap: wrap;
           }
         }
