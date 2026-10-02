@@ -1270,7 +1270,7 @@ export default function AdminControlPage() {
                         const geleistet = sumWorkedHoursLive(d.items, edits);
                         const masTotal = sumMasHoursLive(d.items, edits);
                         const kDisplayRows = display.komatsu.length > 0 ? display.komatsu : display.machineKomatsu;
-                        const kTotal = round1(kDisplayRows.reduce((sum, k) => sum + (toNumOrNull(komatsuEdits[k.id]?.hours ?? toEditValue(komatsuHours(k))) ?? 0), 0));
+                        const kTotal = kDisplayRows.length === 0 ? null : round1(kDisplayRows.reduce((sum, k) => sum + (toNumOrNull(komatsuEdits[k.id]?.hours ?? toEditValue(komatsuHours(k))) ?? 0), 0));
                         const diffKomatsu = kTotal === null ? null : round1(masTotal - kTotal);
                         const diffArbeitszeit = arbeitszeit === null ? null : round1(geleistet - arbeitszeit);
                         const flags = dayFlags[d.id] ?? defaultFlags(d);
