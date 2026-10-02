@@ -151,11 +151,17 @@ function format1(v: number | null | undefined) {
 
 function todayISO() {
   const d = new Date();
+function lastOfPreviousMonthISO() {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), 0);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function firstOfMonthISO() {
   const d = new Date();
+function firstOfPreviousMonthISO() {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
@@ -383,6 +389,8 @@ export default function AdminControlPage() {
 
   const [from, setFrom] = useState(firstOfMonthISO());
   const [to, setTo] = useState(todayISO());
+  const [from, setFrom] = useState(firstOfPreviousMonthISO);
+  const [to, setTo] = useState(lastOfPreviousMonthISO);
   const [selectedDriver, setSelectedDriver] = useState("");
   const [onlyUnchecked, setOnlyUnchecked] = useState(true);
 
