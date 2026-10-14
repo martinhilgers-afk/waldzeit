@@ -151,6 +151,9 @@ function format1(v: number | null | undefined) {
 
 function todayISO() {
   const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function lastOfPreviousMonthISO() {
   const now = new Date();
   const d = new Date(now.getFullYear(), now.getMonth(), 0);
@@ -159,6 +162,9 @@ function lastOfPreviousMonthISO() {
 
 function firstOfMonthISO() {
   const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
 function firstOfPreviousMonthISO() {
   const now = new Date();
   const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -387,8 +393,6 @@ export default function AdminControlPage() {
   const [meName, setMeName] = useState("");
   const [admin, setAdmin] = useState<boolean | null>(null);
 
-  const [from, setFrom] = useState(firstOfMonthISO());
-  const [to, setTo] = useState(todayISO());
   const [from, setFrom] = useState(firstOfPreviousMonthISO);
   const [to, setTo] = useState(lastOfPreviousMonthISO);
   const [selectedDriver, setSelectedDriver] = useState("");
@@ -1225,6 +1229,19 @@ export default function AdminControlPage() {
           </label>
           <label className="checkBox"><input type="checkbox" checked={onlyUnchecked} onChange={(e) => setOnlyUnchecked(e.target.checked)} />Nur offen</label>
           <button onClick={loadData} disabled={busy} className="btnPrimary">{busy ? "Lade..." : "Aktualisieren"}</button>
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            disabled={busy}
+            className="btn"
+            onClick={() => {
+              setFrom(firstOfPreviousMonthISO());
+              setTo(lastOfPreviousMonthISO());
+              setMsg("Vormonat ausgewählt. Bitte Aktualisieren klicken.");
+            }}
+          >Vormonat</button>
         </div>
 
         {msg && <pre className="msg">{msg}</pre>}

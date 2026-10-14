@@ -102,6 +102,24 @@ const SHEET_HEADERS = [
 
 type SheetHeader = (typeof SHEET_HEADERS)[number];
 
+function normalizedName(value: string | null | undefined) {
+  return String(value ?? "").normalize("NFC").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase("de");
+}
+
+// Count plus actual page length also handles a server cap below the requested size.
+async function fetchAll<T>(query: () => any): Promise<T[]> {
+  const rows: T[] = [];
+  for (;;) {
+    const { data, error, count } = await query().range(rows.length, rows.length + 499);
+    if (error) throw new Error(error.message);
+    if (count === null || count === undefined) throw new Error("Zeilenanzahl fehlt; Export abgebrochen.");
+    const page = (data ?? []) as T[];
+    if (!page.length && rows.length < count) throw new Error("Unvollständige Abfrage; Export abgebrochen.");
+    rows.push(...page);
+    if (rows.length >= count) return rows;
+  }
+}
+
 function todayISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -517,7 +535,8 @@ async function exportToXLSX(filename: string, rows: Array<Record<string, any>>) 
 }
 
 function addHours(target: Map<string, Map<string, number>>, week: string, driverInitials: string, hours: number) {
-  if (!hours || !Number.isFinite(hours)) return;
+  if (!Number.isFinite(hours)) throw new Error("Ungültige Stunden; Export abgebrochen.");
+  if (!hours) return;
   if (!target.has(week)) target.set(week, new Map());
   const row = target.get(week)!;
   row.set(driverInitials, (row.get(driverInitials) ?? 0) + hours);
@@ -535,106 +554,61 @@ async function exportLotObjectXLSX(
   const ws = workbook.addWorksheet("Los-Auswertung");
 
   const machineMap = new Map<string, MachineRow>();
-  for (const m of machineRows) machineMap.set(m.name, m);
-
-  const dayMap = new Map<string, DayRow>();
-  for (const d of days) dayMap.set(d.id, d);
-
-  const relevantItems = items.filter((it) => (it.objekt ?? "").trim() === selectedObject.trim());
-
-  const usedHarvester = Array.from(
-    new Set(
-      relevantItems
-        .filter((it) => machineMap.get(it.maschine ?? "")?.machine_type === "harvester")
-        .map((it) => it.maschine ?? "")
-        .filter(Boolean)
-    )
-  );
-
-  const usedForwarder = Array.from(
-    new Set(
-      relevantItems
-        .filter((it) => machineMap.get(it.maschine ?? "")?.machine_type === "forwarder")
-        .map((it) => it.maschine ?? "")
-        .filter(Boolean)
-    )
-  );
-
-  const harvesterData = new Map<string, Map<string, Map<string, number>>>();
-  const forwarderData = new Map<string, Map<string, Map<string, number>>>();
-  const motormanuelData = new Map<string, Map<string, number>>();
-  const sonstigesData = new Map<string, Map<string, number>>();
+  for (const m of machineRows) {
+    const key = normalizedName(m.name);
+    if (machineMap.has(key)) throw new Error("Mehrdeutiger Maschinenname: " + m.name);
+    machineMap.set(key, m);
+  }
+  const dayMap = new Map(days.map(d => [d.id, d]));
+  const relevantItems = items.filter(it => normalizedName(it.objekt) === normalizedName(selectedObject));
   const weeksSet = new Set<string>();
-
+  const blocks: Array<{ title: string; machineName?: string; data: Map<string, Map<string, number>>; rate: number | null }> = [];
+  const byMachine = new Map<string, (typeof blocks)[number]>();
+  const motormanuel = { title: "Motormanuel", data: new Map<string, Map<string, number>>(), rate: machineMap.get(normalizedName("Motorsäge"))?.hourly_rate ?? null };
+  const sonstiges = { title: "Sonstiges", data: new Map<string, Map<string, number>>(), rate: null };
   for (const it of relevantItems) {
     const day = dayMap.get(it.workday_id);
-    if (!day) continue;
-
-    const week = isoWeekShort(day.date);
+    if (!day) throw new Error("Arbeitstag fehlt für Einsatz " + it.id);
+    const shortWeek = isoWeekShort(day.date);
+    const week = shortWeek.slice(3) + "-KW" + shortWeek.slice(0, 2);
     weeksSet.add(week);
-
-    const driverName = driverMap.get(day.user_id) ?? day.user_id;
-    const ini = initials(driverName);
-
-    const machineName = it.maschine ?? "";
-    const machine = machineMap.get(machineName);
-    const machineType = machine?.machine_type ?? "";
-
-    if (machineType === "harvester") {
-      if (!harvesterData.has(machineName)) harvesterData.set(machineName, new Map());
-      addHours(harvesterData.get(machineName)!, week, ini, Number(it.maschinenstunden_h ?? 0));
+    // Full name plus ID keeps drivers with identical names/initials distinct.
+    const driver = (driverMap.get(day.user_id) ?? day.user_id) + " [" + day.user_id + "]";
+    const key = normalizedName(it.maschine);
+    let block = byMachine.get(key);
+    if (!block) {
+      const machine = machineMap.get(key);
+      const type = normalizedName(machine?.machine_type);
+      const title = type === "harvester" ? "Harvester" : type === "forwarder" ? "Forwarder" : "Maschinenstunden";
+      block = { title, machineName: machine?.name || it.maschine || "Ohne Maschine", data: new Map(), rate: machine?.hourly_rate ?? null };
+      byMachine.set(key, block);
+      blocks.push(block);
     }
-
-    if (machineType === "forwarder") {
-      if (!forwarderData.has(machineName)) forwarderData.set(machineName, new Map());
-      addHours(forwarderData.get(machineName)!, week, ini, Number(it.maschinenstunden_h ?? 0));
-    }
-
-    const motormanuelHours =
-      Number(it.motormanuel_h ?? 0) +
-      (machineName.trim().toLowerCase() === "motorsäge" ? Number(it.maschinenstunden_h ?? 0) : 0);
-
-    addHours(motormanuelData, week, ini, motormanuelHours);
-    addHours(sonstigesData, week, ini, Number(it.sonstiges_h ?? 0));
+    const chainsaw = key === normalizedName("Motorsäge");
+    addHours(chainsaw ? motormanuel.data : block.data, week, driver, Number(it.maschinenstunden_h ?? 0));
+    addHours(motormanuel.data, week, driver, Number(it.motormanuel_h ?? 0));
+    addHours(sonstiges.data, week, driver, Number(it.sonstiges_h ?? 0));
   }
-
-  const weeks = Array.from(weeksSet).sort((a, b) => a.localeCompare(b));
-
-  const blocks: Array<{ title: string; machineName?: string; data: Map<string, Map<string, number>>; rate: number | null }> = [];
-
-  for (const name of usedHarvester) {
-    blocks.push({
-      title: "Harvester",
-      machineName: name,
-      data: harvesterData.get(name) ?? new Map(),
-      rate: machineMap.get(name)?.hourly_rate ?? null,
-    });
-  }
-
-  for (const name of usedForwarder) {
-    blocks.push({
-      title: "Forwarder",
-      machineName: name,
-      data: forwarderData.get(name) ?? new Map(),
-      rate: machineMap.get(name)?.hourly_rate ?? null,
-    });
-  }
-
-  blocks.push({
-    title: "Motormanuel",
-    machineName: "Motorsäge",
-    data: motormanuelData,
-    rate: machineMap.get("Motorsäge")?.hourly_rate ?? null,
+  const ordered = ["Harvester", "Forwarder"].flatMap(title => {
+    const used = blocks.filter(b => b.title === title).sort((a, b) => (a.machineName ?? "").localeCompare(b.machineName ?? "", "de", { numeric: true }));
+    while (used.length < 2) used.push({ title, data: new Map(), rate: null });
+    return used;
   });
+  ordered.push(motormanuel, sonstiges);
+  // Unclassified machine hours remain visible after the familiar template columns.
+  ordered.push(...blocks.filter(b => b.title === "Maschinenstunden" && normalizedName(b.machineName) !== normalizedName("Motorsäge")));
+  blocks.splice(0, blocks.length, ...ordered);
+  const weeks = Array.from(weeksSet).sort();
+  const details = workbook.addWorksheet("Einsätze vollständig");
+  const detailHeaders = ["driver", ...SHEET_HEADERS];
+  setColumnWidths(details, detailHeaders);
+  details.addRow(detailHeaders);
+  styleHeaderRow(details, detailHeaders.length);
+  for (const row of buildExportRows(days, relevantItems, driverMap, true)) details.addRow(detailHeaders.map(h => row[h] ?? ""));
+  details.views = [{ state: "frozen", ySplit: 1 }];
+  details.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: detailHeaders.length } };
 
-  blocks.push({
-    title: "Sonstiges",
-    machineName: "Sonstiges",
-    data: sonstigesData,
-    rate: null,
-  });
-
-  ws.getCell("A1").value = selectedObject;
+  ws.getCell("A1").value = "";
   ws.getCell("A1").font = { bold: true, size: 14 };
 
   ws.getCell("A2").value = "KW";
@@ -643,8 +617,12 @@ async function exportLotObjectXLSX(
 
   let col = 2;
 
-  for (const block of blocks) {
-    ws.mergeCells(1, col, 1, col + 1);
+  for (const [index, block] of blocks.entries()) {
+    if (index === 0 || blocks[index - 1].title !== block.title) {
+      let last = index;
+      while (last + 1 < blocks.length && blocks[last + 1].title === block.title) last++;
+      ws.mergeCells(1, col, 1, col + (last - index) * 2 + 1);
+    }
     ws.getCell(1, col).value = block.title;
     ws.getCell(1, col).font = { bold: true };
     ws.getCell(1, col).alignment = { horizontal: "center" };
@@ -663,14 +641,17 @@ async function exportLotObjectXLSX(
   let rowNr = 3;
 
   for (const week of weeks) {
-    ws.getCell(rowNr, 1).value = week;
+    ws.getCell(rowNr, 1).value = week.slice(-2) + "/" + week.slice(0, 2);
     ws.getCell(rowNr, 1).font = { bold: true };
 
     col = 2;
 
     for (const block of blocks) {
       const driverMapForWeek = block.data.get(week) ?? new Map();
-      const names = Array.from(driverMapForWeek.keys()).sort().join("+");
+      const names = Array.from(driverMapForWeek.keys()).sort().map(label => {
+        const name = label.slice(0, label.lastIndexOf(" ["));
+        return initials(name);
+      }).join("+");
       const hours = Array.from(driverMapForWeek.values()).reduce((a, b) => a + b, 0);
 
       ws.getCell(rowNr, col).value = names;
@@ -683,7 +664,7 @@ async function exportLotObjectXLSX(
     rowNr++;
   }
 
-  const totalRow = Math.max(rowNr + 8, 16);
+  const totalRow = Math.max(rowNr, 17);
   ws.getCell(totalRow, 1).value = "TOTAL";
   ws.getCell(totalRow, 1).font = { bold: true };
 
@@ -693,8 +674,14 @@ async function exportLotObjectXLSX(
     const rate = block.rate ?? "";
     const hoursCol = ws.getColumn(col + 1).letter;
 
-    ws.getCell(totalRow, col).value = rate === "" ? "" : `${rate} €`;
-    ws.getCell(totalRow, col + 1).value = { formula: `SUM(${hoursCol}3:${hoursCol}${rowNr - 1})` };
+    ws.getCell(totalRow, col).value = rate === "" ? 0 : `${rate} €`;
+    const totalHours = Array.from(block.data.values()).reduce(
+      (sum, drivers) => sum + Array.from(drivers.values()).reduce((subtotal, hours) => subtotal + hours, 0),
+      0
+    );
+    ws.getCell(totalRow, col + 1).value = rowNr > 3 && totalHours !== 0
+      ? { formula: `SUM(${hoursCol}3:${hoursCol}${rowNr - 1})`, result: totalHours }
+      : 0;
     ws.getCell(totalRow, col + 1).numFmt = "#,##0.0";
 
     col += 2;
@@ -737,8 +724,11 @@ async function exportMonthlyDriverReportXLSX(
   const workbook = new ExcelJS.Workbook();
   const allDates = listDatesInRange(from, to);
 
-  const daysByDriverDate = new Map<string, DayRow>();
-  for (const d of days) daysByDriverDate.set(`${d.user_id}__${d.date}`, d);
+  const daysByDriverDate = new Map<string, DayRow[]>();
+  for (const d of days) {
+    const key = `${d.user_id}__${d.date}`;
+    daysByDriverDate.set(key, [...(daysByDriverDate.get(key) ?? []), d]);
+  }
 
   const itemsByWorkday = new Map<string, ItemRow[]>();
   for (const it of items) {
@@ -748,10 +738,9 @@ async function exportMonthlyDriverReportXLSX(
 
   const sortedDrivers = [...drivers].sort(sortByLastnameLabel);
 
-  for (const drv of sortedDrivers) {
-    const worksheet = workbook.addWorksheet(
-      (drv.label || "Unbekannt").replace(/[\\\/\?\*\[\]\:]/g, "_").slice(0, 31) || "Unbekannt"
-    );
+  for (const [driverIndex, drv] of sortedDrivers.entries()) {
+    const baseName = (drv.label || "Unbekannt").replace(/[\\\/\?\*\[\]\:]/g, "_").slice(0, 24);
+    const worksheet = workbook.addWorksheet(`${baseName}_${driverIndex + 1}`);
 
     setColumnWidths(worksheet, [...SHEET_HEADERS]);
     worksheet.addRow([...SHEET_HEADERS]);
@@ -760,7 +749,8 @@ async function exportMonthlyDriverReportXLSX(
     const workedDaySeen = new Set<string>();
 
     for (const date of allDates) {
-      const day = daysByDriverDate.get(`${drv.id}__${date}`);
+      const dateDays = daysByDriverDate.get(`${drv.id}__${date}`) ?? [];
+      const day = dateDays[0];
 
       if (!day) {
         const rowData = makeRow({ Datum: date });
@@ -769,7 +759,7 @@ async function exportMonthlyDriverReportXLSX(
         continue;
       }
 
-      const dayItems = itemsByWorkday.get(day.id) ?? [];
+      const dayItems = dateDays.flatMap(d => itemsByWorkday.get(d.id) ?? []);
 
       if (dayItems.length === 0) {
         const rowData = makeRow({
@@ -788,6 +778,7 @@ async function exportMonthlyDriverReportXLSX(
       }
 
       for (const it of dayItems) {
+        const day = dateDays.find(d => d.id === it.workday_id)!;
         const dayKey = `${drv.id}__${date}`;
         const arbeitstag = hasWorkedDay(day, it) && !workedDaySeen.has(dayKey) ? 1 : "";
 
@@ -857,7 +848,6 @@ export default function AdminExportPage() {
   const [machines, setMachines] = useState<string[]>([]);
   const [machineRows, setMachineRows] = useState<MachineRow[]>([]);
   const [objects, setObjects] = useState<string[]>([]);
-  const [completedObjectNames, setCompletedObjectNames] = useState<Set<string>>(new Set());
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
   const [driverMap, setDriverMap] = useState<Map<string, string>>(new Map());
 
@@ -877,45 +867,16 @@ export default function AdminExportPage() {
   const needsDriver = useMemo(() => mode === "driver_range" || mode === "driver_object", [mode]);
   const needsObject = useMemo(() => mode === "machine_object" || mode === "driver_object" || mode === "all_object", [mode]);
 
-  useEffect(() => {
-    if (selectedObject && completedObjectNames.has(selectedObject.trim())) {
-      setSelectedObject("");
-    }
-  }, [completedObjectNames, selectedObject]);
-
   async function loadSelectors() {
-    const [m, o, d] = await Promise.all([
-      supabase.from("machines").select("name,hourly_rate,machine_type").eq("is_active", true).order("name", { ascending: true }),
-      supabase.from("objects").select("name,status").order("name", { ascending: true }),
-      supabase
-        .from("driver_profiles")
-        .select("user_id,username,full_name,hourly_wage,is_active")
-        .eq("is_active", true)
-        .order("full_name", { ascending: true }),
+    const [machineData, objectRows, driverData] = await Promise.all([
+      fetchAll<MachineRow>(() => supabase.from("machines").select("name,hourly_rate,machine_type", { count: "exact" }).order("id")),
+      fetchAll<ObjectRow>(() => supabase.from("objects").select("name,status", { count: "exact" }).order("id")),
+      fetchAll<DriverRow>(() => supabase.from("driver_profiles").select("user_id,username,full_name,hourly_wage,is_active", { count: "exact" }).order("user_id")),
     ]);
-
-    const machineData = (((m.data as any[]) ?? []) as MachineRow[]);
     setMachineRows(machineData);
-    setMachines(machineData.map((x) => x.name));
-
-    const objectRows = (((o.data as any[]) ?? []) as ObjectRow[]);
-
-    // Im Export bleiben aktive und deaktivierte Lose sichtbar.
-    // Abgeschlossene Lose werden weder angeboten noch exportiert.
-    const visibleObjects = objectRows
-      .filter((x) => x.status !== "completed")
-      .map((x) => String(x.name || "").trim())
-      .filter(Boolean);
-
-    const completedNames = new Set(
-      objectRows
-        .filter((x) => x.status === "completed")
-        .map((x) => String(x.name || "").trim())
-        .filter(Boolean)
-    );
-
-    setObjects(visibleObjects);
-    setCompletedObjectNames(completedNames);
+    setMachines(machineData.map(x => x.name));
+    setObjects(objectRows.map(x => x.name).filter(Boolean).sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base", numeric: true })));
+    const d = { data: driverData };
 
     const drvRows = (((d.data as any[]) ?? []) as DriverRow[]).filter((x) => x.user_id);
 
@@ -947,7 +908,9 @@ export default function AdminExportPage() {
       const ok = await isAdmin();
       setAdmin(ok);
 
-      if (ok) await loadSelectors();
+      if (ok) {
+        try { await loadSelectors(); } catch (error) { setMsg(String(error)); }
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -966,117 +929,45 @@ export default function AdminExportPage() {
     setLoading(true);
     setMsg("Export wird geladen...");
 
-    // Status der Lose unmittelbar vor jedem Export neu laden.
-    // So kann auch ein zwischenzeitlich abgeschlossenes Los niemals
-    // in einer normalen Auswertung oder in der Los-Auswertung erscheinen.
-    const { data: currentObjectData, error: currentObjectError } = await supabase
-      .from("objects")
-      .select("name,status");
-
-    if (currentObjectError) {
-      setLoading(false);
-      setMsg("Fehler Objektstatus laden: " + currentObjectError.message);
-      return;
-    }
-
-    const currentObjectRows = (((currentObjectData as any[]) ?? []) as ObjectRow[]);
-    const currentCompletedObjectNames = new Set(
-      currentObjectRows
-        .filter((x) => x.status === "completed")
-        .map((x) => String(x.name || "").trim())
-        .filter(Boolean)
-    );
-
-    setCompletedObjectNames(currentCompletedObjectNames);
-
-    if (selectedObject && currentCompletedObjectNames.has(selectedObject.trim())) {
-      setSelectedObject("");
-      setLoading(false);
-      setMsg("Dieses Los wurde inzwischen abgeschlossen und kann nicht mehr exportiert werden.");
-      await loadSelectors();
-      return;
-    }
-
-    let q = supabase
-      .from("workdays")
-      .select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter")
-      .order("date", { ascending: true });
-
-    if (needsRange) q = q.gte("date", from).lte("date", to);
-    if (needsDriver) q = q.eq("user_id", selectedDriver);
-
-    const { data: dayData, error: dayErr } = await q;
-
-    if (dayErr) {
-      setLoading(false);
-      setMsg("Fehler Workdays: " + dayErr.message);
-      return;
-    }
-
-    const days: DayRow[] = ((dayData as any[]) ?? []) as DayRow[];
-    const dayIds = days.map((d) => d.id);
-
-    let items: ItemRow[] = [];
-
-if (dayIds.length > 0) {
-  const chunkSize = 30;
-
-  for (let i = 0; i < dayIds.length; i += chunkSize) {
-    const idChunk = dayIds.slice(i, i + chunkSize);
-
-    const { data: itemData, error: itemErr } = await supabase
-      .from("work_items")
-      .select(
-        "id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h"
-      )
-      .in("workday_id", idChunk);
-
-    if (itemErr) {
-      setLoading(false);
-      setMsg(
-        [
-          "Fehler Work Items:",
-          `Block ${Math.floor(i / chunkSize) + 1}`,
-          `Workdays im Block: ${idChunk.length}`,
-          `Code: ${itemErr.code || "-"}`,
-          `Meldung: ${itemErr.message || "-"}`,
-          `Details: ${itemErr.details || "-"}`,
-          `Hinweis: ${itemErr.hint || "-"}`,
-        ].join("\n")
-      );
-      return;
-    }
-
-    items.push(...((((itemData as any[]) ?? []) as ItemRow[])));
-  }
-}
-
-    // Zentrale Exportregel:
-    // - active: sichtbar
-    // - inactive: sichtbar
-    // - completed: vollständig aus allen Exporten entfernen
-    //
-    // Einträge ohne Objektname oder mit einem historischen Namen, der nicht mehr
-    // in der Objekttabelle existiert, bleiben erhalten. Ausgeblendet werden nur
-    // Lose, die ausdrücklich den Status "completed" besitzen.
-    items = items.filter((it) => {
-      const objectName = String(it.objekt || "").trim();
-      return !objectName || !currentCompletedObjectNames.has(objectName);
+    try {
+    if (needsRange && from > to) throw new Error("Von muss vor Bis liegen.");
+    // Refresh all historical profiles and machines before generating the workbook.
+    const [exportMachines, exportDrivers] = await Promise.all([
+      fetchAll<MachineRow>(() => supabase.from("machines").select("name,hourly_rate,machine_type", { count: "exact" }).order("id")),
+      fetchAll<DriverRow>(() => supabase.from("driver_profiles").select("user_id,username,full_name,hourly_wage,is_active", { count: "exact" }).order("user_id")),
+    ]);
+    const exportDriverMap = new Map(exportDrivers.map(d => [d.user_id, d.full_name?.trim() || d.username?.trim() || d.user_id]));
+    const days = await fetchAll<DayRow>(() => {
+      let q = supabase.from("workdays").select("id,user_id,date,arbeitsbeginn,arbeitsende,kommentar,is_urlaub,is_wetter", { count: "exact" }).order("date").order("id");
+      if (needsRange) q = q.gte("date", from).lte("date", to);
+      if (needsDriver) q = q.eq("user_id", selectedDriver);
+      return q;
     });
+    const dayIds = days.map(d => d.id);
+    let items: ItemRow[] = [];
+    for (let i = 0; i < dayIds.length; i += 30) {
+      const ids = dayIds.slice(i, i + 30);
+      items.push(...await fetchAll<ItemRow>(() => supabase.from("work_items")
+        .select("id,workday_id,objekt,maschine,fahrtzeit_min,mas_start,mas_end,maschinenstunden_h,unterhalt_h,reparatur_h,motormanuel_h,umsetzen_h,sonstiges_h,sonstiges_beschreibung,diesel_l,adblue_l,kommentar,twinch_used,twinch_h", { count: "exact" })
+        .in("workday_id", ids).order("id")));
+    }
+    if (new Set(items.map(it => it.id)).size !== items.length) throw new Error("Doppelte Einsätze; Export abgebrochen.");
+    for (const day of days) if (!exportDriverMap.has(day.user_id)) exportDriverMap.set(day.user_id, day.user_id);
+    const reportDrivers: DriverOption[] = Array.from(exportDriverMap, ([id, label]) => ({ id, label, hourly_wage: exportDrivers.find(d => d.user_id === id)?.hourly_wage ?? null }));
 
     if (needsMachine) {
       const m = selectedMachine.trim();
-      items = items.filter((it) => (it.maschine ?? "").trim() === m);
+      items = items.filter((it) => normalizedName(it.maschine) === normalizedName(m));
     }
 
     if (needsObject) {
       const o = selectedObject.trim();
-      items = items.filter((it) => (it.objekt ?? "").trim() === o);
+      items = items.filter((it) => normalizedName(it.objekt) === normalizedName(o));
     }
 
     if (mode === "all_object") {
       const filename = sanitizeFilename(`Los-Auswertung_${selectedObject}.xlsx`);
-      await exportLotObjectXLSX(filename, selectedObject, days, items, driverMap, machineRows);
+      await exportLotObjectXLSX(filename, selectedObject, days, items, exportDriverMap, exportMachines);
 
       setLoading(false);
       setMsg("✅ Los-Auswertung exportiert.");
@@ -1085,7 +976,7 @@ if (dayIds.length > 0) {
 
     if (mode === "monthly_driver_tables") {
       const filename = sanitizeFilename(`Monatsbericht_Fahrer_${from}_bis_${to}.xlsx`);
-      await exportMonthlyDriverReportXLSX(filename, days, items, drivers, from, to);
+      await exportMonthlyDriverReportXLSX(filename, days, items, reportDrivers, from, to);
 
       setLoading(false);
       setMsg("✅ Monatsbericht exportiert.");
@@ -1101,7 +992,7 @@ if (dayIds.length > 0) {
     }
 
     const hasItemFilter = needsMachine || needsObject;
-    const finalRows = buildExportRows(days, items, driverMap, hasItemFilter);
+    const finalRows = buildExportRows(days, items, exportDriverMap, hasItemFilter);
 
     const labelParts: string[] = [mode];
     if (needsRange) labelParts.push(`${from}_bis_${to}`);
@@ -1117,6 +1008,11 @@ if (dayIds.length > 0) {
 
     setLoading(false);
     setMsg(finalRows.length === 0 ? "✅ Keine Daten im Filter. Leere XLSX exportiert." : `✅ Export fertig: ${finalRows.length} Zeilen`);
+    } catch (error) {
+      setMsg("❌ Export abgebrochen: " + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (admin === null) {
