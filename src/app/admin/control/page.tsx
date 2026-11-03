@@ -795,158 +795,117 @@ export default function AdminControlPage() {
     return issues;
   }
 
-  // Komatsu-Zuordnung: nur eindeutige, noch nicht verwendete Kombinationen übernehmen.
-  // Bei Mehrdeutigkeit bleiben Objekt/Maschine leer, statt falsche Werte zu speichern.
-  async function suggestKomatsuAssignment(driverId: string, date: string, existingItems: ItemRow[] = []) {
-    const { data, error } = await supabase
-      .from("komatsu_hours")
-      .select("id,serial_number,machine_name,corrected_machine_name,driver_name,corrected_driver_id,date,object_name,corrected_object_name,motor_runtime_h,effective_work_h,motorstunden")
-      .eq("date", date);
+  function creationError(error: unknown) {
+    if (!error || typeof error !== "object") return String(error);
+    const e = error as { message?: string; code?: string; details?: string; hint?: string };
+    return [e.message || "Unbekannter Fehler", e.code && "Code: " + e.code, e.details, e.hint].filter(Boolean).join(" · ");
+  }
 
-    if (error) throw new Error("Komatsu-Daten konnten nicht geladen werden: " + error.message);
+  function newItemDefaults(userId: string, date: string, existing: ItemRow[]) {
+    try {
+      const combinations = new Map<string, { objekt: string; maschine: string }>();
+      for (const k of komatsuRows) {
+        if (k.date !== date) continue;
+        const edit = komatsuEdits[k.id];
+        // Eine gelöschte Auswahl darf nicht auf den Importwert zurückfallen.
+        const driverId = edit?.driverId ?? komatsuEffectiveDriverId(k, drivers);
+        if (driverId !== userId) continue;
+        const objekt = norm(edit?.objekt ?? komatsuEffectiveObject(k));
+        const maschine = norm(edit?.machine ?? komatsuEffectiveMachine(k, machines));
+        if (!objekt || !maschine) continue;
+        combinations.set(JSON.stringify([keyPart(objekt), keyPart(maschine)]), { objekt, maschine });
+      }
+      const used = new Set(existing.map(it => JSON.stringify([keyPart(it.objekt), keyPart(it.maschine)])));
+      const unused = [...combinations.entries()].filter(([key]) => !used.has(key));
+      if (unused.length === 1) return { ...unused[0][1], automatic: true };
+    } catch (error) {
+      console.warn("Komatsu-Vorbelegung nicht möglich; Einsatz wird leer angelegt.", error);
+    }
+    return { objekt: null, maschine: null, automatic: false };
+  }
 
-    const candidates = ((data ?? []) as KomatsuRow[])
-      .filter((k) => komatsuEffectiveDriverId(k, drivers) === driverId)
-      .filter((k) => (komatsuHours(k) ?? 0) > 0)
-      .map((k) => ({
-        objekt: komatsuEffectiveObject(k),
-        maschine: komatsuEffectiveMachine(k, machines),
-      }))
-      .filter((x) => x.objekt && x.maschine)
-      .filter((x) => objects.some((o) => keyPart(o.name) === keyPart(x.objekt)))
-      .filter((x) => machines.some((m) => keyPart(m.name) === keyPart(x.maschine)));
+  async function insertNewItem(workdayId: string, defaults: ReturnType<typeof newItemDefaults>) {
+    const payload = {
+      workday_id: workdayId, objekt: defaults.objekt, maschine: defaults.maschine,
+      fahrtzeit_min: null, mas_start: null, mas_end: null, maschinenstunden_h: null,
+      unterhalt_h: null, reparatur_h: null, motormanuel_h: null, umsetzen_h: null,
+      sonstiges_h: null, sonstiges_beschreibung: null, diesel_l: null, adblue_l: null,
+      kommentar: null, twinch_used: false, twinch_h: null,
+    };
+    // Nur bei einer eindeutig abgelehnten NOT-NULL-Zuordnung erneut versuchen.
+    // Netzwerkfehler werden nicht wiederholt, damit keine doppelten Einsätze entstehen.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { error } = await supabase.from("work_items").insert(payload);
+      if (!error) return;
+      const column = ["objekt", "maschine"].find(name =>
+        error.code === "23502" && error.message?.includes('"' + name + '"')
+      ) as "objekt" | "maschine" | undefined;
+      if (column && payload[column] === null) { payload[column] = ""; continue; }
+      throw new Error("work_items: " + creationError(error));
+    }
+    throw new Error("work_items: Einsatz konnte nicht angelegt werden.");
+  }
 
-    const unique = Array.from(
-      new Map(candidates.map((x) => [`${keyPart(x.objekt)}__${keyPart(x.maschine)}`, x])).values()
-    );
-    const unused = unique.filter((x) => !existingItems.some((it) =>
-      keyPart(it.objekt) === keyPart(x.objekt) && keyPart(it.maschine) === keyPart(x.maschine)
-    ));
-
-    if (unused.length === 1) return { ...unused[0], note: "Komatsu-Zuordnung automatisch übernommen." };
-    if (unused.length > 1) return { objekt: null, maschine: null, note: `${unused.length} mögliche Komatsu-Einsätze gefunden. Objekt und Maschine bitte manuell auswählen.` };
-    return { objekt: null, maschine: null, note: "Keine eindeutige, noch nicht verwendete Komatsu-Zuordnung. Bitte manuell auswählen." };
+  async function refreshAfterCreation(message: string) {
+    try {
+      await loadData();
+      setMsg(current => current.startsWith("Fehler") ? message + " · " + current : message);
+    } catch (error) {
+      setMsg(message + " · Neuladen fehlgeschlagen: " + creationError(error));
+    }
   }
 
   async function createDay(driver: DriverRow, date: string, kind: "work" | "urlaub" | "wetter" | "feiertag") {
-    const isWork = kind === "work";
-
+    if (busy) return;
     setBusy(true);
-    setMsg(
-      kind === "work"
-        ? "Tag und Einsatz werden angelegt..."
-        : kind === "urlaub"
-          ? "Urlaubstag wird angelegt..."
-          : kind === "wetter"
-            ? "Wettertag wird angelegt..."
-            : "Feiertag wird angelegt..."
-    );
-
+    setMsg("Tag wird angelegt...");
+    let createdDayId: string | null = null;
     try {
-      const assignment = isWork ? await suggestKomatsuAssignment(driver.user_id, date) : null;
-      const { data: dayData, error: dayErr } = await supabase
-        .from("workdays")
-        .insert({
-          user_id: driver.user_id,
-          date,
-          arbeitsbeginn: null,
-          arbeitsende: null,
-          kommentar: null,
-          is_urlaub: kind === "urlaub",
-          is_wetter: kind === "wetter",
-          is_feiertag: kind === "feiertag",
-          is_controlled: false,
-          controlled_at: null,
-        })
-        .select("id")
-        .single();
-
-      if (dayErr) throw new Error(dayErr.message);
-
-      if (isWork) {
-        const { error: itemErr } = await supabase.from("work_items").insert({
-          workday_id: dayData.id,
-          objekt: assignment?.objekt ?? null,
-          maschine: assignment?.maschine ?? null,
-          fahrtzeit_min: null,
-          mas_start: null,
-          mas_end: null,
-          maschinenstunden_h: null,
-          unterhalt_h: null,
-          reparatur_h: null,
-          motormanuel_h: null,
-          umsetzen_h: null,
-          sonstiges_h: null,
-          sonstiges_beschreibung: null,
-          diesel_l: null,
-          adblue_l: null,
-          kommentar: null,
-          twinch_used: false,
-          twinch_h: null,
-        });
-
-        if (itemErr) throw new Error(itemErr.message);
+      const { data, error } = await supabase.from("workdays").insert({
+        user_id: driver.user_id, date, arbeitsbeginn: null, arbeitsende: null, kommentar: null,
+        is_urlaub: kind === "urlaub", is_wetter: kind === "wetter", is_feiertag: kind === "feiertag",
+        is_controlled: false, controlled_at: null,
+      }).select("id").single();
+      if (error) throw new Error("workdays: " + creationError(error));
+      if (!data?.id) throw new Error("workdays: Keine Tag-ID zurückgegeben. Bitte Seite neu laden und den Tag prüfen.");
+      createdDayId = data.id;
+      setDayOpen(data.id, true);
+      let message = "✅ Tag angelegt.";
+      if (kind === "work") {
+        const defaults = newItemDefaults(driver.user_id, date, []);
+        await insertNewItem(data.id, defaults);
+        message = defaults.automatic ? "✅ Tag und Einsatz angelegt. Komatsu-Zuordnung bitte prüfen." : "✅ Tag und Einsatz angelegt. Bitte Objekt und Maschine manuell auswählen.";
       }
-
-      setDayOpen(dayData.id, true);
-      setMsg(
-        kind === "work"
-          ? `✅ Tag und Einsatz angelegt. ${assignment?.note ?? ""}`
-          : kind === "urlaub"
-            ? "✅ Urlaubstag angelegt."
-            : kind === "wetter"
-              ? "✅ Wettertag angelegt."
-              : "✅ Feiertag angelegt."
-      );
-      await loadData();
-      if (isWork) setMsg(`✅ Tag und Einsatz angelegt. ${assignment?.note ?? ""}`);
-    } catch (e: any) {
-      setMsg("Fehler: " + (e?.message || String(e)));
-    } finally {
-      setBusy(false);
-    }
+      await refreshAfterCreation(message);
+    } catch (error) {
+      const message = "Fehler: " + (createdDayId ? "Tag wurde angelegt, aber der Einsatz nicht. Am vorhandenen Tag ‚+ Einsatz hinzufügen‘ verwenden. " : "Tag konnte nicht angelegt werden. ") + creationError(error);
+      if (createdDayId) await refreshAfterCreation(message);
+      else setMsg(message);
+    } finally { setBusy(false); }
   }
 
   async function addItemToDay(day: ControlDay) {
-
+    if (busy) return;
     setBusy(true);
     setMsg("Einsatz wird hinzugefügt...");
-
+    let inserted = false;
     try {
-      const assignment = await suggestKomatsuAssignment(day.user_id, day.date, day.items);
-      const { error: dayErr } = await supabase.from("workdays").update({ is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null }).eq("id", day.id);
-      if (dayErr) throw new Error(dayErr.message);
-
-      const { error: itemErr } = await supabase.from("work_items").insert({
-        workday_id: day.id,
-        objekt: assignment.objekt,
-        maschine: assignment.maschine,
-        fahrtzeit_min: null,
-        mas_start: null,
-        mas_end: null,
-        maschinenstunden_h: null,
-        unterhalt_h: null,
-        reparatur_h: null,
-        motormanuel_h: null,
-        umsetzen_h: null,
-        sonstiges_h: null,
-        sonstiges_beschreibung: null,
-        diesel_l: null,
-        adblue_l: null,
-        kommentar: null,
-        twinch_used: false,
-        twinch_h: null,
-      });
-
-      if (itemErr) throw new Error(itemErr.message);
+      const defaults = newItemDefaults(day.user_id, day.date, day.items);
+      await insertNewItem(day.id, defaults);
+      inserted = true;
       setDayOpen(day.id, true);
-      await loadData();
-      setMsg(`✅ Einsatz hinzugefügt. ${assignment.note}`);
-    } catch (e: any) {
-      setMsg("Fehler: " + (e?.message || String(e)));
-    } finally {
-      setBusy(false);
-    }
+      // Erst nach erfolgreicher Anlage den Tagesstatus ändern.
+      const { data, error } = await supabase.from("workdays").update({
+        is_urlaub: false, is_wetter: false, is_feiertag: false, is_controlled: false, controlled_at: null,
+      }).eq("id", day.id).select("id").single();
+      if (error) throw new Error("Tagesstatus (workdays): " + creationError(error));
+      if (!data?.id) throw new Error("Tagesstatus konnte nicht bestätigt werden.");
+      await refreshAfterCreation(defaults.automatic ? "✅ Einsatz hinzugefügt. Komatsu-Zuordnung bitte prüfen." : "✅ Einsatz hinzugefügt. Bitte Objekt und Maschine manuell auswählen.");
+    } catch (error) {
+      const message = "Fehler: " + (inserted ? "Einsatz wurde gespeichert; Tagesstatus konnte nicht aktualisiert werden. Nicht erneut hinzufügen. " : "Einsatz konnte nicht angelegt werden. ") + creationError(error);
+      if (inserted) await refreshAfterCreation(message);
+      else setMsg(message);
+    } finally { setBusy(false); }
   }
 
   async function saveItem(item: ItemRow) {
