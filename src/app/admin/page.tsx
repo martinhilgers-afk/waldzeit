@@ -51,7 +51,7 @@ function toNumOrNull(v: string) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Beim Release-Build als ISO-8601-Zeitstempel mit Zeitzone setzen.
+// Für eine neue Version den Zeitstempel unten aktualisieren.
 function formatReleaseTime(value: string | undefined) {
   if (!value || !/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
 
@@ -65,7 +65,7 @@ function formatReleaseTime(value: string | undefined) {
   }).format(date);
 }
 
-const releaseTimestamp = process.env.NEXT_PUBLIC_RELEASE_TIMESTAMP;
+const releaseTimestamp = "2026-11-19T15:11:48+01:00";
 const releaseLabel = formatReleaseTime(releaseTimestamp);
 
 export default function AdminPage() {
